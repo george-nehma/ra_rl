@@ -7,9 +7,9 @@ environemnt shows reach-avoid reinforcement learning's performance on a
 well-known reachability analysis benchmark.
 """
 
-import gym.spaces
+import gymnasium.spaces
 import numpy as np
-import gym
+import gymnasium as gym
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LinearLocator
 import torch

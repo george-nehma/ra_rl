@@ -17,3 +17,7 @@ from .dubins_car_pe import DubinsCarPEEnv
 from .point_mass import PointMassEnv
 
 from .zermelo_show import ZermeloShowEnv
+
+# from .new_dubins_car import DubinsCarEnv
+
+from .new_point_mass import PointMass2Env

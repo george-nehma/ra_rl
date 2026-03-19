@@ -8,9 +8,9 @@ reach-avoid reinforcemnt learning can be extended to find an approximate
 solution of the two-player zero-sum game.
 """
 
-import gym.spaces
+import gymnasium.spaces
 import numpy as np
-import gym
+import gymnasium as gym
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LinearLocator
 import torch

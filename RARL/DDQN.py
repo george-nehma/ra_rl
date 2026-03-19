@@ -13,6 +13,7 @@ https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
 import torch
 import torch.optim as optim
 import abc
+import numpy as np
 
 from collections import namedtuple
 import os
@@ -22,7 +23,7 @@ from .model import StepLRMargin, StepResetLR
 from .ReplayMemory import ReplayMemory
 from .utils import soft_update, save_model
 
-Transition = namedtuple("Transition", ["s", "a", "r", "s_", "info"])
+Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "info"])
 
 
 class DDQN(abc.ABC):
@@ -116,29 +117,29 @@ class DDQN(abc.ABC):
     """
     raise NotImplementedError
 
-  @abc.abstractmethod
-  def initBuffer(self, env):
-    """
-    Should be implemented in child class. Implement how to initialize the
-    replay buffer (memory).
-    """
-    raise NotImplementedError
+  # @abc.abstractmethod
+  # def initBuffer(self, env):
+  #   """
+  #   Should be implemented in child class. Implement how to initialize the
+  #   replay buffer (memory).
+  #   """
+  #   raise NotImplementedError
 
-  @abc.abstractmethod
-  def initQ(self):
-    """
-    Should be implemented in child class. Implement how to initialize the
-    Q_network.
-    """
-    raise NotImplementedError
+  # @abc.abstractmethod
+  # def initQ(self):
+  #   """
+  #   Should be implemented in child class. Implement how to initialize the
+  #   Q_network.
+  #   """
+  #   raise NotImplementedError
 
-  @abc.abstractmethod
-  def learn(self):
-    """
-    Should be implemented in child class. Implement the learning algorithm,
-    it may call initBuffer, initQ and update.
-    """
-    raise NotImplementedError
+  # @abc.abstractmethod
+  # def learn(self):
+  #   """
+  #   Should be implemented in child class. Implement the learning algorithm,
+  #   it may call initBuffer, initQ and update.
+  #   """
+  #   raise NotImplementedError
 
   def update_target_network(self):
     """
@@ -196,7 +197,7 @@ class DDQN(abc.ABC):
       pickle.dump(self.CONFIG, open(config_path, "wb"))
       self.saved = True
 
-  def restore(self, step, logs_path, verbose=True):
+  def restore(self, step, logs_path, verbose=True, prefix=""):
     """Restores the model weights from the given model path.
 
     Args:
@@ -204,7 +205,7 @@ class DDQN(abc.ABC):
         logs_path (str): he folder path of the model.
         verbose (bool, optional): print messages if True. Defaults to True.
     """
-    logs_path = os.path.join(logs_path, "model", "Q-{}.pth".format(step))
+    logs_path = os.path.join(logs_path, prefix + "model", "Q-{}.pth".format(step))
     self.Q_network.load_state_dict(
         torch.load(logs_path, map_location=self.device)
     )
@@ -229,11 +230,25 @@ class DDQN(abc.ABC):
     non_final_mask = torch.tensor(
         tuple(map(lambda s: s is not None, batch.s_)), dtype=torch.bool
     ).to(self.device)
-    non_final_state_nxt = torch.FloatTensor([
+
+    if self.dimList[0] == 3:
+      state = torch.FloatTensor(np.concatenate( [np.array(batch.s), np.array(batch.a).reshape(-1, 1)],axis=1)).to(self.device)
+      action = torch.LongTensor(batch.d).to(self.device).view(-1, 1)
+      non_final_state_nxt = torch.FloatTensor(
+        np.concatenate(
+          [
+            np.array([s_ for s_ in batch.s_ if s_ is not None]),
+            np.array([a_ for s_, a_ in zip(batch.s_, batch.a_) if s_ is not None]).reshape(-1, 1)
+          ],
+          axis=1
+        )
+      ).to(self.device)
+    else:
+      state = torch.FloatTensor(batch.s).to(self.device)
+      action = torch.LongTensor(batch.a).to(self.device).view(-1, 1)
+      non_final_state_nxt = torch.FloatTensor([
         s for s in batch.s_ if s is not None
-    ]).to(self.device)
-    state = torch.FloatTensor(batch.s).to(self.device)
-    action = torch.LongTensor(batch.a).to(self.device).view(-1, 1)
+      ]).to(self.device)
     reward = torch.FloatTensor(batch.r).to(self.device)
 
     g_x = torch.FloatTensor([info["g_x"] for info in batch.info])

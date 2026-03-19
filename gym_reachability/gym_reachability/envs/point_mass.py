@@ -7,9 +7,9 @@ This environemnt is roughly the same as the basic version of `zermelo_show.py`,
 but this environment has a grid of cells (used for tabular Q-learning).
 """
 
-import gym.spaces
+import gymnasium.spaces
 import numpy as np
-import gym
+import gymnasium as gym
 
 from utils.utils import nearest_real_grid_point
 from utils.utils import state_to_index

@@ -16,7 +16,7 @@ import os.path
 import pickle
 import argparse
 
-import gym
+import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -198,7 +198,7 @@ env = gym.make(
     env_name, device=device, mode="RA", doneType='toThreshold',
     obstacle_sampling=True
 )
-env.set_costParam(penalty=CONFIG.PENALTY, reward=CONFIG.REWARD)
+env.env.env.set_costParam(penalty=CONFIG.PENALTY, reward=CONFIG.REWARD)
 
 
 # == EXPERIMENT ==
@@ -216,7 +216,7 @@ def run_experiment(args, CONFIG, env):
   actionList = np.arange(numAction)
   dimList = [s_dim] + args.architecture + [numAction]
 
-  env.set_seed(args.randomSeed)
+  env.env.env.set_seed(args.randomSeed)
   np.random.seed(args.randomSeed)
   agent = DDQNSingle(CONFIG, numAction, actionList, dimList, mode='RA')
 
@@ -267,8 +267,8 @@ def test_experiment(path, config_path, env, doneType='toFailureOrSuccess'):
     CONFIG.DEVICE = device
   report_config(CONFIG)
 
-  env.doneType = doneType
-  env.set_costParam(penalty=CONFIG.PENALTY, reward=CONFIG.REWARD)
+  env.env.env.doneType = doneType
+  env.env.env.set_costParam(penalty=CONFIG.PENALTY, reward=CONFIG.REWARD)
 
   dimList = [s_dim] + CONFIG.ARCHITECTURE + [numAction]
   agent = DDQNSingle(
@@ -278,7 +278,7 @@ def test_experiment(path, config_path, env, doneType='toFailureOrSuccess'):
   agent.restore(path)
 
   # Visualize value function.
-  env.visualize(
+  env.env.env.visualize(
       agent.Q_network, True, nx=91, ny=91, boolPlot=False, trueRAZero=False,
       addBias=False, lvlset=0
   )

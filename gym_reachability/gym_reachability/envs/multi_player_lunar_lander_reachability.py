@@ -9,15 +9,15 @@ e.g., single lunar lander environment.
 import numpy as np
 import math
 
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import Box2D
 from Box2D.b2 import (
     edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef,
     contactListener
 )
-from gym.utils import seeding
-from gym.utils import EzPickle
+from gymnasium.utils import seeding
+from gymnasium.utils import EzPickle
 
 # NOTE the overrides cause crashes with ray in this file but I would like to
 # include them for clarity in the future
@@ -141,7 +141,7 @@ class MultiPlayerLunarLanderReachability(gym.Env, EzPickle):
 
     # From parent constuctor.
     EzPickle.__init__(self)
-    self.seed()
+    # self.seed() not needed for new gymnasium
     self.viewer = None
     self.world = Box2D.b2World()
     self.moon = None
@@ -534,7 +534,7 @@ class MultiPlayerLunarLanderReachability(gym.Env, EzPickle):
         self.world.DestroyBody(self.legs[ii][0])
         self.world.DestroyBody(self.legs[ii][1])
 
-  def reset(self, state_in=None, terrain_polyline=None):
+  def reset(self, state_in=None, terrain_polyline=None, seed=None):
     """Resets the environment according to a uniform distribution.
 
     Args:

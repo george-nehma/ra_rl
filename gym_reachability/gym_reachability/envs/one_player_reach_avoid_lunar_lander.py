@@ -9,7 +9,7 @@ high-dimensional dynamic ststem.
 
 import numpy as np
 
-import gym
+import gymnasium
 from Box2D.b2 import (
     edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef,
     contactListener
@@ -126,7 +126,7 @@ class OnePlayerReachAvoidLunarLander(MultiPlayerLunarLanderReachability):
           self.visual_initial_states
       )
 
-  def reset(self, state_in=None, terrain_polyline=None):
+  def reset(self, state_in=None, terrain_polyline=None, seed=None):
     """Resets the state of the environment.
 
     Args:
@@ -137,7 +137,7 @@ class OnePlayerReachAvoidLunarLander(MultiPlayerLunarLanderReachability):
     Returns:
         np.ndarray: The state that the environment has been reset to.
     """
-    return super().reset(state_in=state_in, terrain_polyline=terrain_polyline)
+    return super().reset(state_in=state_in, terrain_polyline=terrain_polyline, seed=seed)
 
   def step(self, action):
     """Evolves the environment one step forward given an action.

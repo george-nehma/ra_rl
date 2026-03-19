@@ -4,7 +4,7 @@ Authors: Kai-Chieh Hsu ( kaichieh@princeton.edu )
          Vicenc Rubies Royo ( vrubies@berkeley.edu )
 """
 
-from gym.envs.registration import register
+from gymnasium.envs.registration import register
 
 register(
     id="multi_player_lunar_lander_reachability-v0", entry_point=(
@@ -38,4 +38,14 @@ register(
 register(
     id="zermelo_show-v0",
     entry_point="gym_reachability.gym_reachability.envs:ZermeloShowEnv"
+)
+
+register(
+    id="dubins_car_new-v0",
+    entry_point="gym_reachability.gym_reachability.envs:DubinsCarEnv"
+)
+
+register(
+    id="point_mass-v1",
+    entry_point="gym_reachability.gym_reachability.envs:PointMass2Env"
 )

@@ -10,9 +10,9 @@ envType:
     'show': corresponds to Fig. 3 in the paper.
 """
 
-import gym.spaces
+import gymnasium.spaces
 import numpy as np
-import gym
+import gymnasium as gym
 import matplotlib.pyplot as plt
 import torch
 import random
@@ -607,7 +607,7 @@ class ZermeloShowEnv(gym.Env):
         outsideRight = (state[0] > self.bounds[0, 1])
         done = outsideTop or outsideLeft or outsideRight
         if done:
-          result = 1
+          result = -1
           break
       else:
         if self.safety_margin(state[:2]) > 0:
