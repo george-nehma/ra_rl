@@ -22,8 +22,8 @@ from .env_utils import calculate_margin_rect
 class ZermeloShowEnv(gym.Env):
 
   def __init__(
-      self, device, mode='RA', doneType='toEnd', thickness=.1,
-      sample_inside_obs=False, envType='show'
+      self, device, mode='AARA', doneType='toEnd', thickness=.1,
+      sample_inside_obs=False, envType='basic'
   ):
     """Initializes the environment with given arguments.
 
@@ -52,15 +52,30 @@ class ZermeloShowEnv(gym.Env):
     # Time-step Parameters.
     self.time_step = 0.05
 
+    # mode: normal or extend (keep track of ell & g)
+    self.mode = mode
+    if mode == 'extend':
+      self.state = np.zeros(3)
+    else:
+      self.state = np.zeros(2)
+
     # Control Parameters.
     if envType == 'basic' or envType == 'easy':
-      self.upward_speed = 2.
+      if self.mode == "RA":
+        self.upward_speed = 2.
+      elif self.mode == "AARA":
+        self.upward_speed = 1.5
     else:
       self.upward_speed = .5
     self.horizontal_rate = 1.
     self.discrete_controls = np.array([[
         -self.horizontal_rate, self.upward_speed
     ], [0, self.upward_speed], [self.horizontal_rate, self.upward_speed]])
+
+    self.disturb_scale = 0.5
+    self.discrete_disturb = np.array([[
+        -self.disturb_scale*self.horizontal_rate,0
+    ], [0, 0], [self.disturb_scale*self.horizontal_rate, 0]])
 
     # Constraint Set Parameters.
     # [X-position, Y-position, width, height]
@@ -111,12 +126,7 @@ class ZermeloShowEnv(gym.Env):
     self.costType = 'sparse'
     self.scaling = 1.
 
-    # mode: normal or extend (keep track of ell & g)
-    self.mode = mode
-    if mode == 'extend':
-      self.state = np.zeros(3)
-    else:
-      self.state = np.zeros(2)
+    
     self.doneType = doneType
 
     # Visualization Parameters
@@ -169,7 +179,7 @@ class ZermeloShowEnv(gym.Env):
       new_states.append(np.append(state, max(l_x, g_x)))
     return new_states
 
-  def reset(self, start=None):
+  def reset(self, *, seed=None, options=None, start=None):
     """Resets the state of the environment.
 
     Args:
@@ -185,7 +195,10 @@ class ZermeloShowEnv(gym.Env):
       )
     else:
       self.state = start
-    return np.copy(self.state)
+
+    super().reset(seed=seed)
+    info = {}
+    return np.copy(self.state), info
 
   def sample_random_state(self, sample_inside_obs=False):
     """Picks the state uniformly at random.
@@ -202,11 +215,69 @@ class ZermeloShowEnv(gym.Env):
     while inside_obs:
       xy_sample = np.random.uniform(low=self.low, high=self.high)
       g_x = self.safety_margin(xy_sample)
-      inside_obs = (g_x > 0)
+      # inside_obs = (g_x > 0)
+
+      inside_rect = (g_x > 0)
+      inside_diag = self.is_inside_diagonal_region(xy_sample)
+      inside_obs = inside_rect or inside_diag
+
       if sample_inside_obs:
         break
 
     return xy_sample
+  
+  def is_inside_diagonal_region(self, xy, min=False):
+    x, y = xy
+    if min == False:
+      slope = self.upward_speed / ((1-self.disturb_scale) * self.horizontal_rate)
+    elif min == True:
+      slope = self.upward_speed / self.horizontal_rate
+
+
+    # ---- Check unsafe constraint polygons ----
+    for cons, cType in zip(self.constraint_x_y_w_h, self.constraint_type):
+        cx, cy, w, h = cons
+        x1 = cx - w/2.0
+        x2 = cx + w/2.0
+        y_min = cy - h/2.0
+
+        if cType == 'C':     # both sides diagonal
+            # line from (x1, y_min) with slope -slope
+            b1 = y_min - (-slope)*x1
+            # line from (x2, y_min) with slope +slope
+            b2 = y_min - ( slope)*x2
+
+            if y > (-slope)*x + b1 and y > slope*x + b2 and y < y_min:
+                return True
+
+        elif cType == 'L':   # left boundary diagonal only
+            b = y_min - slope*x2
+            if y > slope*x + b and y < y_min:
+                return True
+
+        elif cType == 'R':   # right boundary diagonal only
+            b = y_min - (-slope)*x1
+            if y > (-slope)*x + b  and y < y_min:
+                return True
+
+    # ---- Check target region diagonal boundary (upper) ----
+    x, y = xy
+    cx, cy, w, h = self.target_x_y_w_h[0]
+    x1 = cx - w/2.0
+    x2 = cx + w/2.0
+    y_max = cy + h/2.0
+
+    # left diagonal boundary
+    bL = y_max - slope*x1
+    if y > slope*x + bL:
+        return True
+
+    # right diagonal boundary
+    bR = y_max - (-slope)*x2
+    if y > (-slope)*x + bR:
+        return True
+
+    return False
 
   # == Dynamics ==
   def step(self, action):
@@ -222,15 +293,18 @@ class ZermeloShowEnv(gym.Env):
         dict: consist of target margin and safety margin at the new state.
     """
 
+    action, disturbance = action # unpack control and disturbance
     u = self.discrete_controls[action]
-    state, [l_x, g_x] = self.integrate_forward(self.state, u)
+    d = self.discrete_disturb[disturbance]
+    u_tot = u - d
+    state, [l_x, g_x] = self.integrate_forward(self.state, u_tot)
     self.state = state
 
     fail = g_x > 0
     success = l_x <= 0
 
     # = `cost` signal
-    if self.mode == 'RA':
+    if self.mode == 'RA' or self.mode == "AARA":
       if fail:
         cost = self.penalty
       elif success:
@@ -531,7 +605,7 @@ class ZermeloShowEnv(gym.Env):
     ])
     return [axes, aspect_ratio]
 
-  def get_value(self, q_func, nx=41, ny=121, addBias=False):
+  def get_value(self, q_func, nx=41, ny=121, addBias=False, pro_q_func=None):
     """Gets the state values given the Q-network.
 
     Args:
@@ -558,8 +632,12 @@ class ZermeloShowEnv(gym.Env):
       l_x = self.target_margin(np.array([x, y]))
       g_x = self.safety_margin(np.array([x, y]))
 
-      if self.mode == 'normal' or self.mode == 'RA':
+      if self.mode == 'normal' or self.mode == 'RA' or self.mode == 'AARA' and pro_q_func is None:
         state = torch.FloatTensor([x, y]).to(self.device).unsqueeze(0)
+      elif self.mode == 'AARA' and pro_q_func is not None:
+        state = torch.FloatTensor([x, y]).to(self.device).unsqueeze(0)
+        action_index = pro_q_func(state).min(dim=1)[1].item()
+        sa = torch.cat([state, torch.tensor([[action_index]], dtype=torch.float32).to(self.device)], dim=1)
       else:
         z = max([l_x, g_x])
         state = torch.FloatTensor([x, y, z]).to(self.device).unsqueeze(0)
@@ -567,13 +645,16 @@ class ZermeloShowEnv(gym.Env):
       if addBias:
         v[idx] = q_func(state).min(dim=1)[0].item() + max(l_x, g_x)
       else:
-        v[idx] = q_func(state).min(dim=1)[0].item()
+        if pro_q_func is None:
+          v[idx] = q_func(state).min(dim=1)[0].item()  # index [0] of min() gives value, [1] gives index 
+        else:
+          v[idx] = q_func(sa).max(dim=1)[0].item()
       it.iternext()
     return xs, ys, v
 
   # == Trajectory Functions ==
   def simulate_one_trajectory(
-      self, q_func, T=250, state=None, keepOutOf=False, toEnd=False
+      self, pro_q_func, adv_q_func, T=250, state=None, keepOutOf=False, toEnd=False
   ):
     """Simulates the trajectory given the state or randomly initialized.
 
@@ -619,17 +700,22 @@ class ZermeloShowEnv(gym.Env):
 
       state_tensor = torch.FloatTensor(state)
       state_tensor = state_tensor.to(self.device).unsqueeze(0)
-      action_index = q_func(state_tensor).min(dim=1)[1].item()
+      action_index = pro_q_func(state_tensor).min(dim=1)[1].item() # index [1] of min() gives index, [0] gives value 
+      sa = torch.cat([state_tensor, torch.tensor([[action_index]], dtype=torch.float32).to(self.device)], dim=1)
+      disturb_index = adv_q_func(sa).max(dim=1)[1].item()
       u = self.discrete_controls[action_index]
+      d = self.discrete_disturb[disturb_index]
 
-      state, _ = self.integrate_forward(state, u)
+      u_tot = u - d
+
+      state, _ = self.integrate_forward(state, u_tot)
       traj_x.append(state[0])
       traj_y.append(state[1])
 
     return traj_x, traj_y, result
 
   def simulate_trajectories(
-      self, q_func, T=250, num_rnd_traj=None, states=None, toEnd=False
+      self, pro_q_func, adv_q_func, T=250, num_rnd_traj=None, states=None, toEnd=False
   ):
     """
     Simulates the trajectories. If the states are not provided, we pick the
@@ -675,7 +761,7 @@ class ZermeloShowEnv(gym.Env):
         y = ys[idx[1]]
         state = np.array([x, y])
         traj_x, traj_y, result = self.simulate_one_trajectory(
-            q_func, T=T, state=state, toEnd=toEnd
+            pro_q_func, adv_q_func, T=T, state=state, toEnd=toEnd
         )
         trajectories.append((traj_x, traj_y))
         results[idx] = result
@@ -685,7 +771,7 @@ class ZermeloShowEnv(gym.Env):
       results = np.empty(shape=(len(states),), dtype=int)
       for idx, state in enumerate(states):
         traj_x, traj_y, result = self.simulate_one_trajectory(
-            q_func, T=T, state=state, toEnd=toEnd
+            pro_q_func, adv_q_func, T=T, state=state, toEnd=toEnd
         )
         trajectories.append((traj_x, traj_y))
         results[idx] = result
@@ -697,7 +783,7 @@ class ZermeloShowEnv(gym.Env):
     pass
 
   def visualize(
-      self, q_func, vmin=-1, vmax=1, nx=201, ny=201, labels=None,
+      self, pro_q_func, adv_q_func, vmin=-1, vmax=1, nx=201, ny=201, labels=None,
       boolPlot=False, addBias=False, cmap='seismic'
   ):
     """
@@ -728,13 +814,13 @@ class ZermeloShowEnv(gym.Env):
 
     # == Plot V ==
     self.plot_v_values(
-        q_func, ax=ax, fig=fig, vmin=vmin, vmax=vmax, nx=nx, ny=ny, cmap=cmap,
+        pro_q_func, ax=ax, fig=fig, vmin=vmin, vmax=vmax, nx=nx, ny=ny, cmap=cmap,
         boolPlot=boolPlot, cbarPlot=cbarPlot, addBias=addBias
     )
 
     # == Plot Trajectories ==
     self.plot_trajectories(
-        q_func, states=self.visual_initial_states, toEnd=False, ax=ax
+        pro_q_func, adv_q_func, states=self.visual_initial_states, toEnd=False, ax=ax
     )
 
     # == Formatting ==
@@ -789,7 +875,7 @@ class ZermeloShowEnv(gym.Env):
         cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=16)
 
   def plot_trajectories(
-      self, q_func, T=250, num_rnd_traj=None, states=None, toEnd=False,
+      self, pro_q_func, adv_q_func, T=250, num_rnd_traj=None, states=None, toEnd=False,
       ax=None, c='k', lw=2, zorder=2
   ):
     """Plots trajectories given the agent's Q-network.
@@ -816,7 +902,7 @@ class ZermeloShowEnv(gym.Env):
             or (len(states) == num_rnd_traj))
 
     trajectories, results = self.simulate_trajectories(
-        q_func, T=T, num_rnd_traj=num_rnd_traj, states=states, toEnd=toEnd
+        pro_q_func, adv_q_func, T=T, num_rnd_traj=num_rnd_traj, states=states, toEnd=toEnd
     )
 
     for traj in trajectories:
@@ -864,7 +950,8 @@ class ZermeloShowEnv(gym.Env):
         lw (int, optional): liewidth. Defaults to 3.
         zorder (int, optional): graph layers order. Defaults to 1.
     """
-    slope = self.upward_speed / self.horizontal_rate
+    slope_max = self.upward_speed / ((1 - self.disturb_scale) * self.horizontal_rate)
+    slope_min = self.upward_speed / self.horizontal_rate
 
     def get_line(slope, end_point, x_limit, ns=100):
       x_end, y_end = end_point
@@ -881,17 +968,31 @@ class ZermeloShowEnv(gym.Env):
       x2 = x + w/2.0
       y_min = y - h/2.0
       if cType == 'C':
-        xs, ys = get_line(-slope, end_point=[x1, y_min], x_limit=x)
+        # for max Reach-Avoid Set (worst case disturbance)
+        xs, ys = get_line(-slope_max, end_point=[x1, y_min], x_limit=x)
+        ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
+        xs, ys = get_line(slope_max, end_point=[x2, y_min], x_limit=x)
+        ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
+        # for min Reach-Avoid Set (no disturbance)
+        xs, ys = get_line(-slope_min, end_point=[x1, y_min], x_limit=x)
         ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder)
-        xs, ys = get_line(slope, end_point=[x2, y_min], x_limit=x)
+        xs, ys = get_line(slope_min, end_point=[x2, y_min], x_limit=x)
         ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder)
       elif cType == 'L':
+        # for max Reach-Avoid Set (worst case disturbance)
         x_limit = self.bounds[0, 0]
-        xs, ys = get_line(slope, end_point=[x2, y_min], x_limit=x_limit)
+        xs, ys = get_line(slope_max, end_point=[x2, y_min], x_limit=x_limit)
+        ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
+        # for min Reach-Avoid Set (no disturbance)
+        xs, ys = get_line(slope_min, end_point=[x2, y_min], x_limit=x_limit)
         ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder)
       elif cType == 'R':
+        # for max Reach-Avoid Set (worst case disturbance)
         x_limit = self.bounds[0, 1]
-        xs, ys = get_line(-slope, end_point=[x1, y_min], x_limit=x_limit)
+        xs, ys = get_line(-slope_max, end_point=[x1, y_min], x_limit=x_limit)
+        ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
+        # for min Reach-Avoid Set (no disturbance)
+        xs, ys = get_line(-slope_min, end_point=[x1, y_min], x_limit=x_limit)
         ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder)
 
     # border unsafe set
@@ -899,10 +1000,18 @@ class ZermeloShowEnv(gym.Env):
     x1 = x - w/2.0
     x2 = x + w/2.0
     y_max = y + h/2.0
-    xs, ys = get_line(slope, end_point=[x1, y_max], x_limit=self.low[0])
+    # for max Reach-Avoid Set (worst case disturbance)
+    xs, ys = get_line(slope_max, end_point=[x1, y_max], x_limit=self.low[0])
+    ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
+    xs, ys = get_line(-slope_max, end_point=[x2, y_max], x_limit=self.high[0])
+    ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder, label='Max boundary')
+    # for min Reach-Avoid Set (no disturbance)
+    xs, ys = get_line(slope_min, end_point=[x1, y_max], x_limit=self.low[0])
+    ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder, label='Min boundary')
+    xs, ys = get_line(-slope_min, end_point=[x2, y_max], x_limit=self.high[0])
     ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder)
-    xs, ys = get_line(-slope, end_point=[x2, y_max], x_limit=self.high[0])
-    ax.plot(xs, ys, color=c, linewidth=lw, zorder=zorder)
+
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.3))
 
   def plot_formatting(self, ax=None, labels=None):
     """Formats the visualization.

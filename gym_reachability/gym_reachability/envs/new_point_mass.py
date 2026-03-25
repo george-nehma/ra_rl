@@ -14,13 +14,14 @@ import torch
 import random
 import matplotlib.pyplot as plt
 
+from .env_utils import calculate_margin_rect
 from utils.utils import nearest_real_grid_point
 from utils.utils import state_to_index
 
 
 class PointMass2Env(gym.Env):
 
-  def __init__(self, device, mode='RA', sample_inside_obs=False,):
+  def __init__(self, device, mode='AARA', sample_inside_obs=False,):
     """Initializes the environment with given arguments.
     """
     # State bounds.
@@ -30,6 +31,9 @@ class PointMass2Env(gym.Env):
     ])
     self.low = self.bounds[:, 0]
     self.high = self.bounds[:, 1]
+
+    self.penalty = 1.
+    self.reward = -1.
 
     self.sample_inside_obs = sample_inside_obs
 
@@ -88,13 +92,13 @@ class PointMass2Env(gym.Env):
     self.viewer = None
 
     # Discretization.
-    self.grid_cells = None
+    # self.grid_cells = None
 
     # Internal state.
     self.state = np.zeros(2)
 
     self.seed_val = 0
-    self.costType = 'max'
+    # self.costType = 'max'
 
     # Visualization params
     self.vis_init_flag = True
@@ -160,6 +164,7 @@ class PointMass2Env(gym.Env):
 
   def step(self, action):
     """Evolves the environment one step forward under given action.
+        For Reach-Avoid reward is NOT used.
 
     Args:
         action (tuple): the indexes of the action and disturbance
@@ -171,18 +176,19 @@ class PointMass2Env(gym.Env):
         bool: True if the episode is terminated.
         dictionary: consist of safety margin at the new state.
     """
-    action, disturbance = action
+    action, disturbance = action # unpack control and disturbance
     # The signed distance must be computed before the environment steps
     # forward.
-    if self.grid_cells is None:
-      l_x = self.target_margin(self.state)
-      g_x = self.safety_margin(self.state)
-    else:
-      nearest_point = nearest_real_grid_point(
-          self.grid_cells, self.bounds, self.state
-      )
-      l_x = self.target_margin(nearest_point)
-      g_x = self.safety_margin(nearest_point)
+    # if self.grid_cells is None:
+    #   l_x = self.target_margin(self.state)
+    #   g_x = self.safety_margin(self.state)
+    # else:
+    #   nearest_point = nearest_real_grid_point(
+    #       self.grid_cells, self.bounds, self.state
+    #   )
+    #   l_x = self.target_margin(nearest_point)
+    #   g_x = self.safety_margin(nearest_point)
+
 
     # Move dynamics one step forward.
     x, y = self.state
@@ -194,10 +200,27 @@ class PointMass2Env(gym.Env):
     x, y = self.integrate_forward(x, y, u_tot)
     self.next_state = np.array([x, y])
 
+    l_x = self.target_margin(self.next_state)
+    g_x = self.safety_margin(self.next_state)
+
+    # cost = max(l_x, g_x)
+
+    fail = g_x > 0
+    success = l_x <= 0
+
+    if fail:
+        cost = self.penalty
+    elif success:
+        cost = self.reward
+    else:
+        cost = 0.
+
+    self.state = self.next_state
+
     # Calculate whether episode is done.
     done = ((g_x > 0) or (l_x <= 0)) # unsafe or target is reached
     info = {"g_x": g_x, "l_x": l_x}
-    return np.copy(self.next_state), max(l_x, g_x), done, info
+    return np.copy(self.next_state), cost, done, info
 
   def integrate_forward(self, x, y, u):
     """Integrates the dynamics forward by one step.
@@ -230,6 +253,7 @@ class PointMass2Env(gym.Env):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
+  # == Getting Margin ==
   def safety_margin(self, s):
     """Computes the margin (e.g. distance) between the state and the failue set.
 
@@ -240,30 +264,19 @@ class PointMass2Env(gym.Env):
         float: postivive numbers indicate being inside the failure set (safety
             violation).
     """
-    box1_safety_margin = -(
-        np.linalg.norm(s - self.box1_x_y_length[:2], ord=np.inf)
-        - self.box1_x_y_length[-1] / 2.0
-    )
-    box2_safety_margin = -(
-        np.linalg.norm(s - self.box2_x_y_length[:2], ord=np.inf)
-        - self.box2_x_y_length[-1] / 2.0
-    )
-    box3_safety_margin = -(
-        np.linalg.norm(s - self.box3_x_y_length[:2], ord=np.inf)
-        - self.box3_x_y_length[-1] / 2.0
-    )
+    g_x_list = []
 
-    vertical_margin = (
-        np.abs(s[1] - (self.low[1] + self.high[1]) / 2.0)
-        - self.interval[1] / 2.0
-    )
-    horizontal_margin = np.abs(s[0]) - 2.0
-    enclosure_safety_margin = max(horizontal_margin, vertical_margin)
+    # constraint_set_safety_margin
+    for _, constraint_set in enumerate(self.constraint_x_y_w_h):
+      g_x = calculate_margin_rect(s, constraint_set, negativeInside=False)
+      g_x_list.append(g_x)
 
-    safety_margin = max(
-        box1_safety_margin, box2_safety_margin, box3_safety_margin,
-        enclosure_safety_margin
-    )
+    # enclosure_safety_margin
+    boundary_x_y_w_h = np.append(self.midpoint, self.interval)
+    g_x = calculate_margin_rect(s, boundary_x_y_w_h, negativeInside=True)
+    g_x_list.append(g_x)
+
+    safety_margin = np.max(np.array(g_x_list))
 
     return self.scaling * safety_margin
 
@@ -277,51 +290,54 @@ class PointMass2Env(gym.Env):
         float: negative numbers indicate reaching the target. If the target set
             is not specified, return None.
     """
-    box4_target_margin = (
-        np.linalg.norm(s - self.box4_x_y_length[:2], ord=np.inf)
-        - self.box4_x_y_length[-1] / 2.0
-    )
+    l_x_list = []
 
-    target_margin = box4_target_margin
+    # target_set_safety_margin
+    for _, target_set in enumerate(self.target_x_y_w_h):
+      l_x = calculate_margin_rect(s, target_set, negativeInside=True)
+      l_x_list.append(l_x)
+
+    target_margin = np.max(np.array(l_x_list))
+
     return self.scaling * target_margin
+  
+#   def set_grid_cells(self, grid_cells):
+#     """Sets the number of grid cells.
 
-  def set_grid_cells(self, grid_cells):
-    """Sets the number of grid cells.
+#     Args:
+#         grid_cells (tuple of ints): the ith value is the number of grid_cells
+#             for ith dimension of state.
+#     """
+#     self.grid_cells = grid_cells
 
-    Args:
-        grid_cells (tuple of ints): the ith value is the number of grid_cells
-            for ith dimension of state.
-    """
-    self.grid_cells = grid_cells
+#   def set_bounds(self, bounds):
+#     """Sets the boundary and the observation_space of the environment.
 
-  def set_bounds(self, bounds):
-    """Sets the boundary and the observation_space of the environment.
+#     Args:
+#         bounds (np.ndarray): of the shape (n_dim, 2). Each row is [LB, UB].
+#     """
+#     self.bounds = bounds
 
-    Args:
-        bounds (np.ndarray): of the shape (n_dim, 2). Each row is [LB, UB].
-    """
-    self.bounds = bounds
+#     # Get lower and upper bounds
+#     self.low = np.array(self.bounds)[:, 0]
+#     self.high = np.array(self.bounds)[:, 1]
 
-    # Get lower and upper bounds
-    self.low = np.array(self.bounds)[:, 0]
-    self.high = np.array(self.bounds)[:, 1]
+#     # Double the range in each state dimension for Gym interface.
+#     self.observation_space = gym.spaces.Box(
+#         np.float32(self.midpoint - self.interval / 2),
+#         np.float32(self.midpoint + self.interval / 2)
+#     )
 
-    # Double the range in each state dimension for Gym interface.
-    self.observation_space = gym.spaces.Box(
-        np.float32(self.midpoint - self.interval / 2),
-        np.float32(self.midpoint + self.interval / 2)
-    )
+#   def set_discretization(self, grid_cells, bounds):
+#     """Sets the number of grid cells and state bounds.
 
-  def set_discretization(self, grid_cells, bounds):
-    """Sets the number of grid cells and state bounds.
-
-    Args:
-        grid_cells (tuple of ints): the ith value is the number of grid_cells
-            for ith dimension of state.
-        bounds (np.ndarray): Bounds for the state.
-    """
-    self.set_grid_cells(grid_cells)
-    self.set_bounds(bounds)
+#     Args:
+#         grid_cells (tuple of ints): the ith value is the number of grid_cells
+#             for ith dimension of state.
+#         bounds (np.ndarray): Bounds for the state.
+#     """
+#     self.set_grid_cells(grid_cells)
+#     self.set_bounds(bounds)
 
   def get_value(self, q_func, nx=41, ny=121, addBias=False):
     """Gets the state values given the Q-network.
@@ -448,7 +464,7 @@ class PointMass2Env(gym.Env):
     return (x_box4_pos, y_box4_pos)
   
   def visualize(
-      self, q_func, vmin=-1, vmax=1, nx=201, ny=201, labels=None,
+      self, pro_q_func, adv_q_func, vmin=-1, vmax=1, nx=201, ny=201, labels=None,
       boolPlot=False, addBias=False, cmap='seismic'
   ):
     """
@@ -479,14 +495,14 @@ class PointMass2Env(gym.Env):
 
     # == Plot V ==
     self.plot_v_values(
-        q_func, ax=ax, fig=fig, vmin=vmin, vmax=vmax, nx=nx, ny=ny, cmap=cmap,
+        pro_q_func, ax=ax, fig=fig, vmin=vmin, vmax=vmax, nx=nx, ny=ny, cmap=cmap,
         boolPlot=boolPlot, cbarPlot=cbarPlot, addBias=addBias
     )
 
     # == Plot Trajectories ==
-    # self.plot_trajectories(
-    #     pro_q_func, adv_q_func, states=self.visual_initial_states, toEnd=False, ax=ax
-    # )
+    self.plot_trajectories(
+        pro_q_func, adv_q_func, states=self.visual_initial_states, ax=ax
+    )
 
     # == Formatting ==
     self.plot_formatting(ax=ax, labels=labels)
@@ -592,7 +608,7 @@ class PointMass2Env(gym.Env):
     traj_y = [y]
     result = 0 # not finished 
 
-    for t in range(T):
+    for _ in range(T):
       outsideTop = (state[1] >= self.bounds[1, 1])
       outsideLeft = (state[0] <= self.bounds[0, 0])
       outsideRight = (state[0] >= self.bounds[0, 1])
@@ -677,6 +693,7 @@ class PointMass2Env(gym.Env):
         it.iternext()
       results = results.reshape(-1)
     else:
+      results = np.empty(shape=(len(states),), dtype=int)
       for idx, state in enumerate(states):
         results = np.empty(shape=(len(states),), dtype=int)
         traj_x, traj_y, result = self.simulate_one_trajectory(pro_q_func, adv_q_func, T=T, state=state)

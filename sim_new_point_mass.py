@@ -25,13 +25,15 @@ import gymnasium as gym
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import torch
 
 from RARL.DDQNSingle import DDQNSingle
+from RARL.DDQNCriticEnsemble import CriticEnsemble
 from RARL.Trainer import Trainer
-from RARL.config import dqnConfig
+from RARL.config import dqnConfig, ceConfig
 from RARL.utils import save_obj
-from utils.envWrapper import envWrapper
+from utils.utils import plot_protagonist_adversary_actions, plot_RA_eval, plot_protagonist_adversary_values, PlotConfig
 from gym_reachability import gym_reachability  # Custom Gym env.
 
 matplotlib.use('Agg')
@@ -59,7 +61,7 @@ parser.add_argument(
     "-p", "--penalty", help="when entering failure set", default=1, type=float
 )
 parser.add_argument(
-    "-s", "--scaling", help="scaling of ell/g", default=1, type=float
+    "-s", "--scaling", help="scaling of ell/g", default=4, type=float
 )
 
 # training scheme
@@ -70,7 +72,7 @@ parser.add_argument(
     "-wi", "--warmupIter", help="warmup iteration", default=2000, type=int
 )
 parser.add_argument(
-    "-mu", "--maxUpdates", help="maximal #gradient updates", default=1000000,
+    "-mu", "--maxUpdates", help="maximal #gradient updates", default=300000,
     type=int
 )
 parser.add_argument(
@@ -100,6 +102,9 @@ parser.add_argument(
 parser.add_argument(
     "-act", "--actType", help="activation type", default='Tanh', type=str
 )
+parser.add_argument(
+    "-nc", "--numCritic", help="number of critics", default=3, type=int
+)
 
 # RL type
 parser.add_argument("-m", "--mode", help="mode", default='AARA', type=str)
@@ -126,12 +131,12 @@ args = parser.parse_args()
 print(args)
 
 # == CONFIGURATION ==
-env_name = "point_mass-v1"
+env_name = "zermelo_show-v0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 maxUpdates = args.maxUpdates
 updateTimes = args.updateTimes
 updatePeriod = int(maxUpdates / updateTimes)
-maxSteps = 250
+maxSteps = 100
 storeFigure = args.storeFigure
 plotFigure = args.plotFigure
 
@@ -172,28 +177,27 @@ elif args.mode == 'AARA':
     EPS_PERIOD = updatePeriod
     EPS_RESET_PERIOD = maxUpdates
 
-  sample_inside_obs = False
+sample_inside_obs = False
 
 # == Environment ==
 print("\n== Environment Information ==")
 env = gym.make(
     env_name, device=device,
-    sample_inside_obs=sample_inside_obs
+    sample_inside_obs=sample_inside_obs, envType="basic"
 )
-env = envWrapper(env)
 
-stateDim = env.state.shape[0]
-actionNum = env.action_space.n
+stateDim = env.unwrapped.state.shape[0]
+actionNum = env.unwrapped.action_space.n
 action_list = np.arange(actionNum)
 print(
     "State Dimension: {:d}, ActionSpace Dimension: {:d}".format(
         stateDim, actionNum
     )
 )
-print(f"Discrete Controls: {env.discrete_controls}")
+print(f"Discrete Controls: {env.unwrapped.discrete_controls}")
 
-# env.set_costParam(args.penalty, args.reward, args.costType, args.scaling) # only needed for Lagrange
-env.set_seed(args.randomSeed)
+env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling) # only needed for Lagrange
+env.unwrapped.set_seed(args.randomSeed)
 # print(
 #     "Cost type: {}, Margin scaling: {:.1f}, ".
 #     format(env.costType, env.scaling)
@@ -208,8 +212,8 @@ if plotFigure or storeFigure:
   v = np.zeros((nx, ny))
   l_x = np.zeros((nx, ny))
   g_x = np.zeros((nx, ny))
-  xs = np.linspace(env.bounds[0, 0], env.bounds[0, 1], nx)
-  ys = np.linspace(env.bounds[1, 0], env.bounds[1, 1], ny)
+  xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
+  ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
 
   it = np.nditer(v, flags=['multi_index'])
 
@@ -218,13 +222,13 @@ if plotFigure or storeFigure:
     x = xs[idx[0]]
     y = ys[idx[1]]
 
-    l_x[idx] = env.target_margin(np.array([x, y]))
-    g_x[idx] = env.safety_margin(np.array([x, y]))
+    l_x[idx] = env.unwrapped.target_margin(np.array([x, y]))
+    g_x[idx] = env.unwrapped.safety_margin(np.array([x, y]))
 
     v[idx] = np.maximum(l_x[idx], g_x[idx])
     it.iternext()
 
-  axStyle = env.get_axes()
+  axStyle = env.unwrapped.get_axes()
 
   fig, axes = plt.subplots(1, 3, figsize=(12, 6))
 
@@ -255,7 +259,7 @@ if plotFigure or storeFigure:
       v.T, interpolation='none', extent=axStyle[0], origin="lower",
       cmap="seismic", vmin=vmin, vmax=vmax
   )
-  env.plot_reach_avoid_set(ax)
+  env.unwrapped.plot_reach_avoid_set(ax)
   cbar = fig.colorbar(
       im, ax=ax, pad=0.01, fraction=0.05, shrink=.95, ticks=[vmin, 0, vmax]
   )
@@ -263,8 +267,8 @@ if plotFigure or storeFigure:
   ax.set_title(r'$v(x)$', fontsize=18)
 
   for ax in axes:
-    env.plot_target_failure_set(ax=ax)
-    env.plot_formatting(ax=ax)
+    env.unwrapped.plot_target_failure_set(ax=ax)
+    env.unwrapped.plot_formatting(ax=ax)
 
   fig.tight_layout()
   if storeFigure:
@@ -287,14 +291,15 @@ PRO_CONFIG = dqnConfig(
     LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100
 )
 
-ADV_CONFIG = dqnConfig(
+args.architecture = [120,20]
+ADV_CONFIG = ceConfig(
     DEVICE=device, ENV_NAME=env_name, SEED=args.randomSeed,
     MAX_UPDATES=maxUpdates, MAX_EP_STEPS=maxSteps, BATCH_SIZE=64,
     MEMORY_CAPACITY=args.memoryCapacity, ARCHITECTURE=args.architecture,
     ACTIVATION=args.actType, GAMMA=args.gamma, GAMMA_PERIOD=updatePeriod,
     GAMMA_END=GAMMA_END, EPS_PERIOD=EPS_PERIOD, EPS_DECAY=0.7,
     EPS_RESET_PERIOD=EPS_RESET_PERIOD, LR_C=args.learningRate,
-    LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100
+    LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100, NUM_CRITICS=args.numCritic
 )
 
 # == TRAINER ==
@@ -318,7 +323,7 @@ if args.warmup:
 
 # == ADVERSARY AGENT ==
 dimList = [stateDim + 1] + ADV_CONFIG.ARCHITECTURE + [actionNum] # +1 for sending the action into the adversary network 
-adversary = DDQNSingle(
+adversary = CriticEnsemble(
     ADV_CONFIG, actionNum, trainer.memory, dimList=dimList, mode=agentMode,
     terminalType=args.terminalType
 )
@@ -408,12 +413,15 @@ if plotFigure or storeFigure:
 
   nx = 41
   ny = 121
-  xs = np.linspace(env.bounds[0, 0], env.bounds[0, 1], nx)
-  ys = np.linspace(env.bounds[1, 0], env.bounds[1, 1], ny)
+  xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
+  ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
 
   resultMtx = np.empty((nx, ny), dtype=int)
   actDistMtx = np.empty((nx, ny), dtype=int)
+  disturbDistMtx = np.empty((nx, ny), dtype=int)
   it = np.nditer(resultMtx, flags=['multi_index'])
+  analytic_max_fail = 0
+  analytic_min_fail = 0
 
   while not it.finished:
     idx = it.multi_index
@@ -424,65 +432,48 @@ if plotFigure or storeFigure:
     state = np.array([x, y])
     stateTensor = torch.FloatTensor(state).to(device).unsqueeze(0)
     action_index = protagonist.Q_network(stateTensor).min(dim=1)[1].cpu().item()
-    # u = env.discrete_controls[action_index]
+    # sa = torch.cat([stateTensor, torch.tensor([[action_index]], dtype=torch.float32).to(device)], dim=1)
+    # disturb_index = adversary.Q_network(sa).max(dim=1)[1].cpu().item()
+    disturb_index = protagonist.Q_network(stateTensor).max(dim=1)[1].cpu().item()
     actDistMtx[idx] = action_index
+    disturbDistMtx[idx] = disturb_index
 
-    _, _, result = env.simulate_one_trajectory(
+    _, _, result = env.unwrapped.simulate_one_trajectory(
         protagonist.Q_network, adversary.Q_network, T=250, state=state
     )
+    
+    g_x = env.unwrapped.safety_margin(state)
+    inside_max_diag = env.unwrapped.is_inside_diagonal_region(state)
+    inside_min_diag = env.unwrapped.is_inside_diagonal_region(state, min=True)
+    if g_x > 0:
+      analytic_min_fail += 1
+      analytic_max_fail += 1
+    else:
+      if inside_max_diag:
+        analytic_max_fail += 1
+      if inside_min_diag: 
+        analytic_min_fail += 1
+
     resultMtx[idx] = result
     it.iternext()
 
-  fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharex=True, sharey=True)
-  axStyle = env.get_axes()
+  print('Analytical Success Rate for Maximal Disturbances-{:.3f}'.format(1 - analytic_max_fail/(nx*ny)))
+  print('Analytical Success Rate for No Disturbances-{:.3f}'.format(1 - analytic_min_fail/(nx*ny)))
+  print('Best RA Success Rate with Adversarial Disturbances-{:.3f}'.format((resultMtx == 1).sum()/(nx*ny)))
 
-  # = Action
-  ax = axes[2]
-  im = ax.imshow(
-      actDistMtx.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=0, vmax=actionNum - 1, zorder=-1
-  )
-  ax.set_xlabel('Action', fontsize=24)
+  cfg = PlotConfig(nx=nx, ny=ny, xs=xs, ys=ys, vmin=vmin, vmax=vmax, resultMtx=resultMtx, 
+                   actDistMtx=actDistMtx, disturbDistMtx=disturbDistMtx, figureFolder=figureFolder, 
+                   plotFigure=plotFigure, storeFigure=storeFigure, actionNum=actionNum)
 
-  # = Rollout
-  ax = axes[1]
-  im = ax.imshow(
-      resultMtx.T != 1, interpolation='none', extent=axStyle[0],
-      origin="lower", cmap='seismic', vmin=0, vmax=1, zorder=-1
-  )
-  env.plot_trajectories(
-      protagonist.Q_network, adversary.Q_network, states=env.visual_initial_states, ax=ax,
-      c='w', lw=1.5
-  )
-  ax.set_xlabel('Rollout RA', fontsize=24)
+  plot_RA_eval(env, protagonist, adversary, cfg)
 
-  # = Value
-  ax = axes[0]
-  _, _, v = env.get_value(protagonist.Q_network, nx, ny)
-  im = ax.imshow(
-      v.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=vmin, vmax=vmax, zorder=-1
-  )
-  CS = ax.contour(
-      xs, ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
-  )
-  ax.set_xlabel('Value', fontsize=24)
+  plot_protagonist_adversary_actions(env, protagonist, adversary, cfg)
 
-  for ax in axes:
-    env.plot_target_failure_set(ax=ax)
-    env.plot_reach_avoid_set(ax=ax)
-    env.plot_formatting(ax=ax)
-
-  fig.tight_layout()
-  if storeFigure:
-    figurePath = os.path.join(figureFolder, 'value_rollout_action.png')
-    fig.savefig(figurePath)
-  if plotFigure:
-    plt.show()
-    plt.pause(0.001)
-  plt.close()
+  plot_protagonist_adversary_values(env, protagonist, adversary, cfg)
+  
 
   trainDict['resultMtx'] = resultMtx
   trainDict['actDistMtx'] = actDistMtx
+  trainDict['disturbDistMtx'] = disturbDistMtx
 
 save_obj(trainDict, filePath)

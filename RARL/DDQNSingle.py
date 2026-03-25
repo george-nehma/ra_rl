@@ -26,6 +26,10 @@ import time
 from .model import Model
 from .DDQN import DDQN, Transition
 
+class CriticEnsemble(nn.Module):
+  def __init__(self, n_models, model_fn):
+      super().__init__()
+      self.models = nn.ModuleList([model_fn() for _ in range(n_models)])
 
 class DDQNSingle(DDQN):
   """
@@ -127,9 +131,14 @@ class DDQNSingle(DDQN):
     # == get a' by Q_network: a' = argmin_a' Q_network(s', a') ==
     with torch.no_grad():
       self.Q_network.eval()
-      action_nxt = (
+      if self.dimList[0] == 3:
+        action_nxt = (
+          self.Q_network(non_final_state_nxt).max(1, keepdim=True)[1]
+        )
+      else:
+        action_nxt = (
           self.Q_network(non_final_state_nxt).min(1, keepdim=True)[1]
-      )
+        )
 
     # == get expected value ==
     state_value_nxt = torch.zeros(self.BATCH_SIZE).to(self.device)
@@ -184,13 +193,10 @@ class DDQNSingle(DDQN):
       # V(s) = ( 1 - gamma ) * max{ g(s), l(s) } ) + gamma * ( max{ g(s), min{ l(s), V_diff(s') } }
       #        
       # where V_diff(s') = V(s') + max{ g(s'), l(s') }
-      min_term = torch.min(l_x, state_value_nxt + torch.max(l_x, g_x))
       terminal = torch.max(l_x, g_x)
-      non_terminal = torch.max(min_term, g_x) - terminal
-      y[non_final_mask] = self.GAMMA * non_terminal[non_final_mask]
+      non_terminal = torch.max(g_x[non_final_mask], torch.min(l_x[non_final_mask], state_value_nxt[non_final_mask]))
+      y[non_final_mask] = (1 - self.GAMMA) * terminal[non_final_mask] + self.GAMMA * non_terminal
       y[final_mask] = terminal[final_mask]
-    else:  # V(s) = c(s, a) + gamma * V(s') == Lagrange method ==
-      y = state_value_nxt * self.GAMMA + reward
 
     # == regression: Q(s, a) <- V(s) ==
     loss = smooth_l1_loss(
@@ -208,7 +214,7 @@ class DDQNSingle(DDQN):
 
     return loss.item()
 
-  def select_action(self, state, explore=False):
+  def select_action(self, state, agent='pro', explore=False):
     """Selects the action given the state and conditioned on `explore` flag.
 
     Args:
@@ -226,14 +232,19 @@ class DDQNSingle(DDQN):
       action_idx = np.random.randint(0, self.numAction)
     else:
       self.Q_network.eval()
-      if len(state.shape) > 1:
-        pro_action_idx = state[1]
-        state = state[0]
-        state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-        action_idx = self.Q_network(state,pro_action_idx).max(dim=1)[1].item()
-      else:
-        state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+      # if len(state.shape) > 1:
+      #   pro_action_idx = state[1]
+      #   state = state[0]
+      #   state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+      #   action_idx = self.Q_network(state,pro_action_idx).max(dim=1)[1].item()
+      # else:
+      #   state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+      #   action_idx = self.Q_network(state).min(dim=1)[1].item()
+      state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+      if agent == 'pro':
         action_idx = self.Q_network(state).min(dim=1)[1].item()
+      elif agent == 'adv':
+        action_idx = self.Q_network(state).max(dim=1)[1].item()
 
     return action_idx
 

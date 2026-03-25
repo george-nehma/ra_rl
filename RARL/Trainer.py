@@ -52,7 +52,6 @@ class Trainer():
         CONFIG (object): configuration.
     """
     self.memory = ReplayMemory(CONFIG.MEMORY_CAPACITY)
-    # super(Trainer, self).__init__(CONFIG)
 
   def store_transition(self, *args):
     """Stores the transition into the replay buffer.
@@ -72,12 +71,13 @@ class Trainer():
       cnt += 1
       print("\rWarmup Buffer [{:d}]".format(cnt), end="")
       s, info = env.reset()
-      u_idx = protagonist.select_action(s, explore=True)
-      d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
+      u_idx = protagonist.select_action(s, agent= 'pro', explore=True)
+      d_idx = protagonist.select_action(s, agent= 'adv', explore=True)
+    #   d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
     #   u, d, u_idx, d_idx = self.select_action(s, explore=True)
       s_, r, done, info = env.step((u_idx, d_idx))
       s_ = None if done else s_
-      u_idx_next = None if done else protagonist.select_action(s_, explore=True)
+      u_idx_next = None if done else protagonist.select_action(s_, agent= 'pro', explore=True)
       self.store_transition(s, u_idx, d_idx, r, s_, u_idx_next, info)
       if done:
         s, info = env.reset()
@@ -159,7 +159,7 @@ class Trainer():
       warmupQ=False, warmupIter=10000, addBias=False, doneTerminate=True,
       runningCostThr=None, curUpdates=None, checkPeriod=50000, plotFigure=True,
       storeFigure=False, showBool=False, vmin=-1, vmax=1, numRndTraj=200,
-      storeModel=True, storeBest=False, outFolder="RA", verbose=True
+      storeModel=True, storeBest=False, outFolder="AARA", verbose=True
   ):
     """Learns the Q function given the training hyper-parameters.
 
@@ -249,31 +249,35 @@ class Trainer():
 
     while protagonist.cntUpdate <= MAX_UPDATES:
       s, info = env.reset()
-      u_idx = protagonist.select_action(s, explore=True)
+      u_idx = protagonist.select_action(s, agent= 'pro', explore=True)
       epCost = 0.0
       ep += 1
       # Rollout
       for step_num in range(MAX_EP_STEPS):
         # Select action
         # u, d, u_idx, d_idx = self.select_action(s,explore=True)
-        u_idx = protagonist.select_action(s, explore=True)
-        d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
+        u_idx = protagonist.select_action(s, agent='pro', explore=True)
+        # d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
+        d_idx = protagonist.select_action(s, agent='adv', explore=True)
 
         # Interact with env
         s_, r, done, info = env.step((u_idx, d_idx))
-        s_ = None if done else s_
+        s_ = None if done or step_num == MAX_EP_STEPS - 1 else s_
         epCost += r
-
+        # print(s_[1]) if s_ is not None else print("done")
         # Store the transition in shared memory
-        u_idx_next = None if done else protagonist.select_action(s_, explore=True)
+        u_idx_next = None if done or step_num == MAX_EP_STEPS - 1 else protagonist.select_action(s_, agent= 'pro', explore=True)
         self.store_transition(s, u_idx, d_idx, r, s_, u_idx_next, info)
         s = s_
         
         # Check after fixed number of gradient updates
         if protagonist.cntUpdate != 0 and protagonist.cntUpdate % checkPeriod == 0:
-          results = env.simulate_trajectories(
+          results = env.unwrapped.simulate_trajectories(
               protagonist.Q_network, adversary.Q_network, T=MAX_EP_STEPS, num_rnd_traj=numRndTraj,
           )[1]
+        #   results = env.unwrapped.simulate_trajectories(
+        #       protagonist.Q_network, T=MAX_EP_STEPS, num_rnd_traj=numRndTraj,
+        #   )[1]
           success = np.sum(results == 1) / results.shape[0]
           failure = np.sum(results == -1) / results.shape[0]
           unfinish = np.sum(results == 0) / results.shape[0]
@@ -303,21 +307,22 @@ class Trainer():
           if plotFigure or storeFigure:
             # self.Q_network.eval()
             if showBool:
-              env.visualize(
-                  protagonist.Q_network, vmin=0, boolPlot=True, addBias=addBias
+              env.unwrapped.visualize(
+                  protagonist.Q_network, adversary.Q_network, vmin=0, boolPlot=True, addBias=addBias
               )
-            #   env.visualize(
-            #       adversary.Q_network, vmin=0, boolPlot=True, addBias=addBias
+            #   env.unwrapped.visualize(
+            #       protagonist.Q_network, vmin=0, boolPlot=True, addBias=addBias
             #   )
+
             else:
-              env.visualize(
-                  protagonist.Q_network, vmin=vmin, vmax=vmax, cmap="seismic",
+              env.unwrapped.visualize(
+                  protagonist.Q_network, adversary.Q_network, vmin=vmin, vmax=vmax, cmap="seismic",
                   addBias=addBias
               )
-            #   env.visualize(
-            #       adversary.Q_network, vmin=vmin, vmax=vmax, cmap="seismic",
-            #       addBias=addBias
+            #   env.unwrapped.visualize(
+            #       protagonist.Q_network, vmin=0, boolPlot=False, addBias=addBias
             #   )
+
             if storeFigure:
               figurePath = os.path.join(
                   figureFolder, "{:d}.png".format(protagonist.cntUpdate)
