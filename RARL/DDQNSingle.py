@@ -214,7 +214,7 @@ class DDQNSingle(DDQN):
 
     return loss.item()
 
-  def select_action(self, state, agent='pro', explore=False):
+  def select_action(self, state, env, agent='pro', explore=False):
     """Selects the action given the state and conditioned on `explore` flag.
 
     Args:
@@ -240,11 +240,14 @@ class DDQNSingle(DDQN):
       # else:
       #   state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
       #   action_idx = self.Q_network(state).min(dim=1)[1].item()
-      state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+      state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
       if agent == 'pro':
-        action_idx = self.Q_network(state).min(dim=1)[1].item()
+        action_idx = self.Q_network(state_tensor).min(dim=1)[1].item()
       elif agent == 'adv':
-        action_idx = self.Q_network(state).max(dim=1)[1].item()
+        if self.CONFIG.SELECT_WORST_Q:
+          action_idx = env.unwrapped.find_worst_d(self.Q_network, state)
+        elif not self.CONFIG.SELECT_WORST_Q:
+          action_idx = self.Q_network(state_tensor).max(dim=1)[1].item()
 
     return action_idx
 

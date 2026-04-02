@@ -19,7 +19,8 @@ class config(object):
       LR_C_PERIOD=1, LR_C_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
       GAMMA_PERIOD=200, GAMMA_DECAY=0.5, MEMORY_CAPACITY=10000, BATCH_SIZE=32,
       RENDER=False, MAX_MODEL=5, ARCHITECTURE=None, ACTIVATION="Tanh",
-      SKIP=False, REWARD=-1, PENALTY=1
+      SKIP=False, REWARD=-1, PENALTY=1, SELECT_WORST_Q=True, FIND_MAX_Q=False, 
+      SIM_MAX_Q=False
   ):
     """Initializes an object of the config class with the specified attributes.
 
@@ -101,6 +102,10 @@ class config(object):
     self.REWARD = REWARD
     self.PENALTY = PENALTY
 
+    self.SELECT_WORST_Q = SELECT_WORST_Q
+    self.FIND_MAX_Q = FIND_MAX_Q
+    self.SIM_MAX_Q = SIM_MAX_Q
+
 
 class dqnConfig(config):
   """Contains hyper-parameters for (double) deep Q-network.
@@ -114,7 +119,8 @@ class dqnConfig(config):
       GAMMA_PERIOD=200, GAMMA_DECAY=0.5, TAU=0.01, HARD_UPDATE=1,
       SOFT_UPDATE=True, MEMORY_CAPACITY=10000, BATCH_SIZE=32, RENDER=False,
       MAX_MODEL=10, DOUBLE=True, ARCHITECTURE=None, ACTIVATION="Tanh",
-      SKIP=False, REWARD=-1, PENALTY=1
+      SKIP=False, REWARD=-1, PENALTY=1, SELECT_WORST_Q=True,
+      FIND_MAX_Q=False, SIM_MAX_Q=False
   ):
     """
     Initializes a configuration object for (double) deep Q-network with the
@@ -160,6 +166,9 @@ class dqnConfig(config):
         SKIP=SKIP,
         REWARD=REWARD,
         PENALTY=PENALTY,
+        SELECT_WORST_Q=SELECT_WORST_Q,
+        FIND_MAX_Q=FIND_MAX_Q,
+        SIM_MAX_Q=SIM_MAX_Q,
     )
     self.DOUBLE = DOUBLE
     self.TAU = TAU

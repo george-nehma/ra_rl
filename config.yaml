@@ -1,0 +1,52 @@
+# == CONFIG ==
+
+# Environment parameters
+environment:
+  doneType: "TF"
+  costType: "max"
+  randomSeed: 0
+  reward: -1.0
+  penalty: 1.0
+  scaling: 4.0
+
+# Training scheme
+training:
+  warmup: false
+  warmupIter: 2000
+  maxUpdates: 200000
+  updateTimes: 10
+  memoryCapacity: 10000
+  checkPeriod: 20000
+
+# NN hyper-parameters
+network:
+  annealing: false
+  architecture: [100, 20]
+  learningRate: 0.001
+  gamma: 0.9999
+  actType: "Tanh"
+  numCritic: 3
+
+# RL type
+rl:
+  mode: "AARA"
+  terminalType: "max"
+
+# File
+file:
+  showTime: true
+  name: ""
+  outFolder: "experiments"
+  plotFigure: false
+  storeFigure: true
+
+# Adversary parameters
+adversary:
+  # for the function select_action() in DDQNSingle.py
+  selectWorstQ: true
+  # for the find_worst_d() function in zermelo_show.py
+  findMaxQ: true
+  # for the simulate_one_trajectory() function in zermelo_show.py (eval)
+  simMaxQ: false
+  # for the final test (of each point in the env) in sim_new_point_mass.py
+  testMaxQ: false

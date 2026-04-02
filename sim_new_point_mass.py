@@ -28,8 +28,11 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import torch
 
+import yaml
+from types import SimpleNamespace
+
 from RARL.DDQNSingle import DDQNSingle
-from RARL.DDQNCriticEnsemble import CriticEnsemble
+# from RARL.DDQNCriticEnsemble import CriticEnsemble
 from RARL.Trainer import Trainer
 from RARL.config import dqnConfig, ceConfig
 from RARL.utils import save_obj
@@ -38,96 +41,18 @@ from gym_reachability import gym_reachability  # Custom Gym env.
 
 matplotlib.use('Agg')
 simplefilter(action='ignore', category=FutureWarning)
-timestr = time.strftime("%Y-%m-%d-%H_%M")
+timestr = time.strftime("%Y-%m-%d-%H_%M_%S")
 
 # == ARGS ==
+
 parser = argparse.ArgumentParser()
+parser.add_argument("--config", default="config.yaml", type=str)
+script_args = parser.parse_args()
 
-# environment parameters
-parser.add_argument(
-    "-dt", "--doneType", help="when to raise done flag", default='TF',
-    type=str
-)
-parser.add_argument(
-    "-ct", "--costType", help="cost type", default='max', type=str
-)
-parser.add_argument(
-    "-rnd", "--randomSeed", help="random seed", default=0, type=int
-)
-parser.add_argument(
-    "-r", "--reward", help="when entering target set", default=-1, type=float
-)
-parser.add_argument(
-    "-p", "--penalty", help="when entering failure set", default=1, type=float
-)
-parser.add_argument(
-    "-s", "--scaling", help="scaling of ell/g", default=4, type=float
-)
+with open(script_args.config, "r") as f:
+    config = yaml.safe_load(f)
 
-# training scheme
-parser.add_argument(
-    "-w", "--warmup", help="warmup Q-network", action="store_true"
-)
-parser.add_argument(
-    "-wi", "--warmupIter", help="warmup iteration", default=2000, type=int
-)
-parser.add_argument(
-    "-mu", "--maxUpdates", help="maximal #gradient updates", default=300000,
-    type=int
-)
-parser.add_argument(
-    "-ut", "--updateTimes", help="#hyper-param. steps", default=10, type=int
-)
-parser.add_argument(
-    "-mc", "--memoryCapacity", help="memoryCapacity", default=10000, type=int
-)
-parser.add_argument(
-    "-cp", "--checkPeriod", help="check period", default=20000, type=int
-)
-
-# NN hyper-parameters
-parser.add_argument(
-    "-a", "--annealing", help="gamma annealing", action="store_true"
-)
-parser.add_argument(
-    "-arc", "--architecture", help="NN architecture", default=[100, 20],
-    nargs="*", type=int
-)
-parser.add_argument(
-    "-lr", "--learningRate", help="learning rate", default=1e-3, type=float
-)
-parser.add_argument(
-    "-g", "--gamma", help="contraction coeff.", default=0.9999, type=float
-)
-parser.add_argument(
-    "-act", "--actType", help="activation type", default='Tanh', type=str
-)
-parser.add_argument(
-    "-nc", "--numCritic", help="number of critics", default=3, type=int
-)
-
-# RL type
-parser.add_argument("-m", "--mode", help="mode", default='AARA', type=str)
-parser.add_argument(
-    "-tt", "--terminalType", help="terminal value", default='max', type=str
-)
-
-# file
-parser.add_argument(
-    "-st", "--showTime", help="show timestr", action="store_true"
-)
-parser.add_argument("-n", "--name", help="extra name", default='', type=str)
-parser.add_argument(
-    "-of", "--outFolder", help="output file", default='experiments', type=str
-)
-parser.add_argument(
-    "-pf", "--plotFigure", help="plot figures", action="store_true"
-)
-parser.add_argument(
-    "-sf", "--storeFigure", help="store figures", action="store_true"
-)
-
-args = parser.parse_args()
+args = SimpleNamespace(**{k: v for section in config.values() for k, v in section.items()})
 print(args)
 
 # == CONFIGURATION ==
@@ -136,7 +61,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 maxUpdates = args.maxUpdates
 updateTimes = args.updateTimes
 updatePeriod = int(maxUpdates / updateTimes)
-maxSteps = 100
+maxSteps = 250
 storeFigure = args.storeFigure
 plotFigure = args.plotFigure
 
@@ -149,12 +74,6 @@ print(outFolder)
 figureFolder = os.path.join(outFolder, 'figure')
 os.makedirs(figureFolder, exist_ok=True)
 
-# if args.mode == 'lagrange':
-#   envMode = 'normal'
-#   agentMode = 'normal'
-#   GAMMA_END = args.gamma
-#   EPS_PERIOD = updatePeriod
-#   EPS_RESET_PERIOD = maxUpdates
 if args.mode == 'RA':
   agentMode = 'RA'
   if args.annealing:
@@ -182,7 +101,7 @@ sample_inside_obs = False
 # == Environment ==
 print("\n== Environment Information ==")
 env = gym.make(
-    env_name, device=device,
+    env_name, config=args, device=device,
     sample_inside_obs=sample_inside_obs, envType="basic"
 )
 
@@ -198,11 +117,7 @@ print(f"Discrete Controls: {env.unwrapped.discrete_controls}")
 
 env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling) # only needed for Lagrange
 env.unwrapped.set_seed(args.randomSeed)
-# print(
-#     "Cost type: {}, Margin scaling: {:.1f}, ".
-#     format(env.costType, env.scaling)
-#     + "Reward: {:.1f}, Penalty: {:.1f}".format(env.reward, env.penalty)
-# )
+
 
 if plotFigure or storeFigure:
   nx, ny = 101, 101
@@ -288,7 +203,9 @@ PRO_CONFIG = dqnConfig(
     ACTIVATION=args.actType, GAMMA=args.gamma, GAMMA_PERIOD=updatePeriod,
     GAMMA_END=GAMMA_END, EPS_PERIOD=EPS_PERIOD, EPS_DECAY=0.7,
     EPS_RESET_PERIOD=EPS_RESET_PERIOD, LR_C=args.learningRate,
-    LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100
+    LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100,
+    SELECT_WORST_Q=args.selectWorstQ, FIND_MAX_Q=args.findMaxQ,
+    SIM_MAX_Q=args.simMaxQ
 )
 
 args.architecture = [120,20]
@@ -323,7 +240,11 @@ if args.warmup:
 
 # == ADVERSARY AGENT ==
 dimList = [stateDim + 1] + ADV_CONFIG.ARCHITECTURE + [actionNum] # +1 for sending the action into the adversary network 
-adversary = CriticEnsemble(
+# adversary = CriticEnsemble(
+#     ADV_CONFIG, actionNum, trainer.memory, dimList=dimList, mode=agentMode,
+#     terminalType=args.terminalType
+# )
+adversary = DDQNSingle(
     ADV_CONFIG, actionNum, trainer.memory, dimList=dimList, mode=agentMode,
     terminalType=args.terminalType
 )
@@ -432,9 +353,10 @@ if plotFigure or storeFigure:
     state = np.array([x, y])
     stateTensor = torch.FloatTensor(state).to(device).unsqueeze(0)
     action_index = protagonist.Q_network(stateTensor).min(dim=1)[1].cpu().item()
-    # sa = torch.cat([stateTensor, torch.tensor([[action_index]], dtype=torch.float32).to(device)], dim=1)
-    # disturb_index = adversary.Q_network(sa).max(dim=1)[1].cpu().item()
-    disturb_index = protagonist.Q_network(stateTensor).max(dim=1)[1].cpu().item()
+    if args.testMaxQ:
+        disturb_index = protagonist.Q_network(stateTensor).max(dim=1)[1].cpu().item()
+    elif not args.testMaxQ:
+        disturb_index = protagonist.select_action(state, env, agent='adv', explore=False)
     actDistMtx[idx] = action_index
     disturbDistMtx[idx] = disturb_index
 
@@ -469,7 +391,7 @@ if plotFigure or storeFigure:
 
   plot_protagonist_adversary_actions(env, protagonist, adversary, cfg)
 
-  plot_protagonist_adversary_values(env, protagonist, adversary, cfg)
+#   plot_protagonist_adversary_values(env, protagonist, adversary, cfg)
   
 
   trainDict['resultMtx'] = resultMtx

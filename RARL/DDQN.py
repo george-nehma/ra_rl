@@ -10,10 +10,12 @@ available at:
 
 https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
 """
+from RARL.config import config
 import torch
 import torch.optim as optim
 import abc
 import numpy as np
+import yaml
 
 from collections import namedtuple
 import os
@@ -193,8 +195,9 @@ class DDQN(abc.ABC):
     """
     save_model(self.Q_network, step, logs_path, "Q", self.MAX_MODEL)
     if not self.saved:
-      config_path = os.path.join(logs_path, "CONFIG.pkl")
-      pickle.dump(self.CONFIG, open(config_path, "wb"))
+      config_path = os.path.join(logs_path, "CONFIG.yaml")
+      with open(config_path, "w") as f:
+        yaml.dump(self.CONFIG, f, default_flow_style=False)
       self.saved = True
 
   def restore(self, step, logs_path, verbose=True, prefix=""):
@@ -233,7 +236,7 @@ class DDQN(abc.ABC):
 
     if self.dimList[0] == 3:
       state = torch.FloatTensor(np.concatenate( [np.array(batch.s), np.array(batch.a).reshape(-1, 1)],axis=1)).to(self.device)
-      action = torch.LongTensor(batch.d).to(self.device).view(-1, 1)
+      action = torch.LongTensor(np.array(batch.a)).to(self.device).view(-1, 1)
       non_final_state_nxt = torch.FloatTensor(
         np.concatenate(
           [
@@ -244,12 +247,12 @@ class DDQN(abc.ABC):
         )
       ).to(self.device)
     else:
-      state = torch.FloatTensor(batch.s).to(self.device)
-      action = torch.LongTensor(batch.a).to(self.device).view(-1, 1)
+      state = torch.FloatTensor(np.array(batch.s)).to(self.device)
+      action = torch.LongTensor(np.array(batch.a)).to(self.device).view(-1, 1)
       non_final_state_nxt = torch.FloatTensor([
         s for s in batch.s_ if s is not None
       ]).to(self.device)
-    reward = torch.FloatTensor(batch.r).to(self.device)
+    reward = torch.FloatTensor(np.array(batch.r)).to(self.device)
 
     g_x = torch.FloatTensor([info["g_x"] for info in batch.info])
     g_x = g_x.to(self.device).view(-1)

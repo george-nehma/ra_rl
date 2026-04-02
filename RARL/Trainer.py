@@ -71,13 +71,13 @@ class Trainer():
       cnt += 1
       print("\rWarmup Buffer [{:d}]".format(cnt), end="")
       s, info = env.reset()
-      u_idx = protagonist.select_action(s, agent= 'pro', explore=True)
-      d_idx = protagonist.select_action(s, agent= 'adv', explore=True)
+      u_idx = protagonist.select_action(s, env, agent= 'pro', explore=True)
+      d_idx = protagonist.select_action(s, env, agent= 'adv', explore=True)
     #   d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
     #   u, d, u_idx, d_idx = self.select_action(s, explore=True)
       s_, r, done, info = env.step((u_idx, d_idx))
       s_ = None if done else s_
-      u_idx_next = None if done else protagonist.select_action(s_, agent= 'pro', explore=True)
+      u_idx_next = None if done else protagonist.select_action(s_, env, agent= 'pro', explore=True)
       self.store_transition(s, u_idx, d_idx, r, s_, u_idx_next, info)
       if done:
         s, info = env.reset()
@@ -249,16 +249,16 @@ class Trainer():
 
     while protagonist.cntUpdate <= MAX_UPDATES:
       s, info = env.reset()
-      u_idx = protagonist.select_action(s, agent= 'pro', explore=True)
+      u_idx = protagonist.select_action(s, env, agent= 'pro', explore=True)
       epCost = 0.0
       ep += 1
       # Rollout
       for step_num in range(MAX_EP_STEPS):
         # Select action
         # u, d, u_idx, d_idx = self.select_action(s,explore=True)
-        u_idx = protagonist.select_action(s, agent='pro', explore=True)
+        u_idx = protagonist.select_action(s, env, agent='pro', explore=True)
         # d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
-        d_idx = protagonist.select_action(s, agent='adv', explore=True)
+        d_idx = protagonist.select_action(s, env, agent='adv', explore=False)
 
         # Interact with env
         s_, r, done, info = env.step((u_idx, d_idx))
@@ -266,7 +266,7 @@ class Trainer():
         epCost += r
         # print(s_[1]) if s_ is not None else print("done")
         # Store the transition in shared memory
-        u_idx_next = None if done or step_num == MAX_EP_STEPS - 1 else protagonist.select_action(s_, agent= 'pro', explore=True)
+        u_idx_next = None if done or step_num == MAX_EP_STEPS - 1 else protagonist.select_action(s_, env, agent= 'pro', explore=True)
         self.store_transition(s, u_idx, d_idx, r, s_, u_idx_next, info)
         s = s_
         

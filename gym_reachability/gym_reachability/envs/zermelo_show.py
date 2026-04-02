@@ -22,7 +22,7 @@ from .env_utils import calculate_margin_rect
 class ZermeloShowEnv(gym.Env):
 
   def __init__(
-      self, device, mode='AARA', doneType='toEnd', thickness=.1,
+      self, config, device, mode='AARA', doneType='toEnd', thickness=.1,
       sample_inside_obs=False, envType='basic'
   ):
     """Initializes the environment with given arguments.
@@ -39,6 +39,7 @@ class ZermeloShowEnv(gym.Env):
         envType (str, optional): environment type. Defaults to 'show'.
     """
     self.envType = envType
+    self.config = config
 
     # State Bounds.
     if envType == 'basic' or envType == 'easy':
@@ -72,10 +73,11 @@ class ZermeloShowEnv(gym.Env):
         -self.horizontal_rate, self.upward_speed
     ], [0, self.upward_speed], [self.horizontal_rate, self.upward_speed]])
 
-    self.disturb_scale = 0.5
+    self.l_disturb_scale = 0.5
+    self.r_disturb_scale = 0.4
     self.discrete_disturb = np.array([[
-        -self.disturb_scale*self.horizontal_rate,0
-    ], [0, 0], [self.disturb_scale*self.horizontal_rate, 0]])
+        -self.l_disturb_scale*self.horizontal_rate,0
+    ], [0, 0], [self.r_disturb_scale*self.horizontal_rate, 0]])
 
     # Constraint Set Parameters.
     # [X-position, Y-position, width, height]
@@ -229,10 +231,11 @@ class ZermeloShowEnv(gym.Env):
   def is_inside_diagonal_region(self, xy, min=False):
     x, y = xy
     if min == False:
-      slope = self.upward_speed / ((1-self.disturb_scale) * self.horizontal_rate)
+      l_slope = self.upward_speed / ((1-self.l_disturb_scale) * self.horizontal_rate)
+      r_slope = self.upward_speed / ((1-self.r_disturb_scale) * self.horizontal_rate)
     elif min == True:
-      slope = self.upward_speed / self.horizontal_rate
-
+      r_slope = self.upward_speed / self.horizontal_rate
+      l_slope = self.upward_speed / self.horizontal_rate
 
     # ---- Check unsafe constraint polygons ----
     for cons, cType in zip(self.constraint_x_y_w_h, self.constraint_type):
@@ -243,21 +246,21 @@ class ZermeloShowEnv(gym.Env):
 
         if cType == 'C':     # both sides diagonal
             # line from (x1, y_min) with slope -slope
-            b1 = y_min - (-slope)*x1
+            b1 = y_min - (-r_slope)*x1
             # line from (x2, y_min) with slope +slope
-            b2 = y_min - ( slope)*x2
+            b2 = y_min - ( l_slope)*x2
 
-            if y > (-slope)*x + b1 and y > slope*x + b2 and y < y_min:
+            if y > (-r_slope)*x + b1 and y > r_slope*x + b2 and y < y_min:
                 return True
 
         elif cType == 'L':   # left boundary diagonal only
-            b = y_min - slope*x2
-            if y > slope*x + b and y < y_min:
+            b = y_min - l_slope*x2
+            if y > l_slope*x + b and y < y_min:
                 return True
 
         elif cType == 'R':   # right boundary diagonal only
-            b = y_min - (-slope)*x1
-            if y > (-slope)*x + b  and y < y_min:
+            b = y_min - (-r_slope)*x1
+            if y > (-r_slope)*x + b  and y < y_min:
                 return True
 
     # ---- Check target region diagonal boundary (upper) ----
@@ -268,16 +271,81 @@ class ZermeloShowEnv(gym.Env):
     y_max = cy + h/2.0
 
     # left diagonal boundary
-    bL = y_max - slope*x1
-    if y > slope*x + bL:
+    bL = y_max - l_slope*x1
+    if y > l_slope*x + bL:
         return True
 
     # right diagonal boundary
-    bR = y_max - (-slope)*x2
-    if y > (-slope)*x + bR:
+    bR = y_max - (-r_slope)*x2
+    if y > (-r_slope)*x + bR:
         return True
 
     return False
+  
+  def find_worst_d(self, pro_Q_network, state):
+    
+    numActions = self.discrete_controls.shape[0]
+    numDisturb = self.discrete_disturb.shape[0]
+    v_best = -1e4
+
+    # for i in range(numActions):
+    #   u = self.discrete_controls[i]
+    #   for j in range(numDisturb):
+    #     d = self.discrete_disturb[j]
+    #     u_tot = u + d
+    #     nxt_state, v_nxt = self.integrate_forward(state, u_tot)
+    #     if self.config.findMaxQ:
+    #       nxt_state = torch.from_numpy(nxt_state).float().unsqueeze(0).to(self.device)
+    #       v = pro_Q_network(nxt_state).max(dim=1)[0].item()
+    #     elif self.config.findMarginV:
+    #       v = v_nxt.max()
+    #     if v > v_best:
+    #       v_best = v
+    #       d_idx = j
+
+    best_u_value = float('inf')
+    best_u = None
+    best_d_for_u = None
+    best_d_idx = None
+
+    for i in range(numActions):
+        u = self.discrete_controls[i]
+
+        # Reset for each protagonist action!!
+        worst_case_value = -float('inf')  
+        worst_d = None
+        d_idx = None
+
+        for j in range(numDisturb):
+            d = self.discrete_disturb[j]
+            u_tot = u + d
+
+            nxt_state, v_nxt = self.integrate_forward(state, u_tot)
+            # nxt_state = torch.from_numpy(nxt_state).float().unsqueeze(0).to(self.device)
+            # adversary tries to MAXIMIZE
+            # value = pro_Q_network(nxt_state).item()
+
+            if self.config.findMaxQ:
+              nxt_state = torch.from_numpy(nxt_state).float().unsqueeze(0).to(self.device)
+              value = pro_Q_network(nxt_state).max(dim=1)[0].item()
+            elif not self.config.findMaxQ:
+              value = v_nxt.max()
+            
+
+            if value > worst_case_value:
+                worst_case_value = value
+                worst_d = d
+                d_idx = j
+
+        # protagonist tries to MINIMIZE
+        if worst_case_value < best_u_value:
+            best_u_value = worst_case_value
+            best_u = u
+            best_d_for_u = worst_d
+            best_d_idx = d_idx
+
+
+    return d_idx
 
   # == Dynamics ==
   def step(self, action):
@@ -296,7 +364,7 @@ class ZermeloShowEnv(gym.Env):
     action, disturbance = action # unpack control and disturbance
     u = self.discrete_controls[action]
     d = self.discrete_disturb[disturbance]
-    u_tot = u - d
+    u_tot = u + d
     state, [l_x, g_x] = self.integrate_forward(self.state, u_tot)
     self.state = state
 
@@ -637,7 +705,7 @@ class ZermeloShowEnv(gym.Env):
       elif self.mode == 'AARA' and pro_q_func is not None:
         state = torch.FloatTensor([x, y]).to(self.device).unsqueeze(0)
         action_index = pro_q_func(state).min(dim=1)[1].item()
-        sa = torch.cat([state, torch.tensor([[action_index]], dtype=torch.float32).to(self.device)], dim=1)
+        # sa = torch.cat([state, torch.tensor([[action_index]], dtype=torch.float32).to(self.device)], dim=1)
       else:
         z = max([l_x, g_x])
         state = torch.FloatTensor([x, y, z]).to(self.device).unsqueeze(0)
@@ -647,8 +715,8 @@ class ZermeloShowEnv(gym.Env):
       else:
         if pro_q_func is None:
           v[idx] = q_func(state).min(dim=1)[0].item()  # index [0] of min() gives value, [1] gives index 
-        else:
-          v[idx] = q_func(sa).max(dim=1)[0].item()
+        # else:
+          # v[idx] = q_func(sa).max(dim=1)[0].item()
       it.iternext()
     return xs, ys, v
 
@@ -701,12 +769,14 @@ class ZermeloShowEnv(gym.Env):
       state_tensor = torch.FloatTensor(state)
       state_tensor = state_tensor.to(self.device).unsqueeze(0)
       action_index = pro_q_func(state_tensor).min(dim=1)[1].item() # index [1] of min() gives index, [0] gives value 
-      sa = torch.cat([state_tensor, torch.tensor([[action_index]], dtype=torch.float32).to(self.device)], dim=1)
-      disturb_index = adv_q_func(sa).max(dim=1)[1].item()
+      if self.config.simMaxQ:
+        disturb_index = pro_q_func(state_tensor).max(dim=1)[1].item() # index [1] of max() gives index, [0] gives value
+      elif not self.config.simMaxQ:
+        disturb_index = self.find_worst_d(pro_q_func, state)
       u = self.discrete_controls[action_index]
       d = self.discrete_disturb[disturb_index]
 
-      u_tot = u - d
+      u_tot = u + d
 
       state, _ = self.integrate_forward(state, u_tot)
       traj_x.append(state[0])
@@ -950,7 +1020,8 @@ class ZermeloShowEnv(gym.Env):
         lw (int, optional): liewidth. Defaults to 3.
         zorder (int, optional): graph layers order. Defaults to 1.
     """
-    slope_max = self.upward_speed / ((1 - self.disturb_scale) * self.horizontal_rate)
+    r_slope_max = self.upward_speed / ((1 - self.r_disturb_scale) * self.horizontal_rate)
+    l_slope_max = self.upward_speed / ((1 - self.l_disturb_scale) * self.horizontal_rate)
     slope_min = self.upward_speed / self.horizontal_rate
 
     def get_line(slope, end_point, x_limit, ns=100):
@@ -969,9 +1040,9 @@ class ZermeloShowEnv(gym.Env):
       y_min = y - h/2.0
       if cType == 'C':
         # for max Reach-Avoid Set (worst case disturbance)
-        xs, ys = get_line(-slope_max, end_point=[x1, y_min], x_limit=x)
+        xs, ys = get_line(-r_slope_max, end_point=[x1, y_min], x_limit=x)
         ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
-        xs, ys = get_line(slope_max, end_point=[x2, y_min], x_limit=x)
+        xs, ys = get_line(l_slope_max, end_point=[x2, y_min], x_limit=x)
         ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
         # for min Reach-Avoid Set (no disturbance)
         xs, ys = get_line(-slope_min, end_point=[x1, y_min], x_limit=x)
@@ -981,7 +1052,7 @@ class ZermeloShowEnv(gym.Env):
       elif cType == 'L':
         # for max Reach-Avoid Set (worst case disturbance)
         x_limit = self.bounds[0, 0]
-        xs, ys = get_line(slope_max, end_point=[x2, y_min], x_limit=x_limit)
+        xs, ys = get_line(l_slope_max, end_point=[x2, y_min], x_limit=x_limit)
         ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
         # for min Reach-Avoid Set (no disturbance)
         xs, ys = get_line(slope_min, end_point=[x2, y_min], x_limit=x_limit)
@@ -989,7 +1060,7 @@ class ZermeloShowEnv(gym.Env):
       elif cType == 'R':
         # for max Reach-Avoid Set (worst case disturbance)
         x_limit = self.bounds[0, 1]
-        xs, ys = get_line(-slope_max, end_point=[x1, y_min], x_limit=x_limit)
+        xs, ys = get_line(-r_slope_max, end_point=[x1, y_min], x_limit=x_limit)
         ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
         # for min Reach-Avoid Set (no disturbance)
         xs, ys = get_line(-slope_min, end_point=[x1, y_min], x_limit=x_limit)
@@ -1001,9 +1072,9 @@ class ZermeloShowEnv(gym.Env):
     x2 = x + w/2.0
     y_max = y + h/2.0
     # for max Reach-Avoid Set (worst case disturbance)
-    xs, ys = get_line(slope_max, end_point=[x1, y_max], x_limit=self.low[0])
+    xs, ys = get_line(l_slope_max, end_point=[x1, y_max], x_limit=self.low[0])
     ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder)
-    xs, ys = get_line(-slope_max, end_point=[x2, y_max], x_limit=self.high[0])
+    xs, ys = get_line(-r_slope_max, end_point=[x2, y_max], x_limit=self.high[0])
     ax.plot(xs, ys, '--', color=c, linewidth=lw, zorder=zorder, label='Max boundary')
     # for min Reach-Avoid Set (no disturbance)
     xs, ys = get_line(slope_min, end_point=[x1, y_max], x_limit=self.low[0])
