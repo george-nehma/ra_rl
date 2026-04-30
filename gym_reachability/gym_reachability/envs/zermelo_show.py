@@ -18,6 +18,10 @@ import torch
 import random
 from .env_utils import calculate_margin_rect
 
+from matplotlib.collections import LineCollection
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+
 
 class ZermeloShowEnv(gym.Env):
 
@@ -51,7 +55,7 @@ class ZermeloShowEnv(gym.Env):
     self.sample_inside_obs = sample_inside_obs
 
     # Time-step Parameters.
-    self.time_step = 0.05
+    self.time_step = self.config.timeStep
 
     # mode: normal or extend (keep track of ell & g)
     self.mode = mode
@@ -200,7 +204,7 @@ class ZermeloShowEnv(gym.Env):
 
     super().reset(seed=seed)
     info = {}
-    return np.copy(self.state), info
+    return np.asarray(self.state, dtype=np.float32), info
 
   def sample_random_state(self, sample_inside_obs=False):
     """Picks the state uniformly at random.
@@ -217,11 +221,11 @@ class ZermeloShowEnv(gym.Env):
     while inside_obs:
       xy_sample = np.random.uniform(low=self.low, high=self.high)
       g_x = self.safety_margin(xy_sample)
-      # inside_obs = (g_x > 0)
+      inside_obs = (g_x > 0)
 
-      inside_rect = (g_x > 0)
-      inside_diag = self.is_inside_diagonal_region(xy_sample)
-      inside_obs = inside_rect or inside_diag
+      # inside_rect = (g_x > 0)
+      # inside_diag = self.is_inside_diagonal_region(xy_sample)
+      # inside_obs = inside_rect or inside_diag
 
       if sample_inside_obs:
         break
@@ -411,7 +415,10 @@ class ZermeloShowEnv(gym.Env):
       info = {"g_x": self.penalty * self.scaling, "l_x": l_x}
     else:
       info = {"g_x": g_x, "l_x": l_x}
-    return np.copy(self.state), cost, done, info
+
+    truncated = False # don't use truncated but added for Gym API
+
+    return np.asarray(self.state, dtype=np.float32), cost, done, truncated, info
 
   def integrate_forward(self, state, u):
     """Integrates the dynamics forward by one step.
@@ -722,7 +729,7 @@ class ZermeloShowEnv(gym.Env):
 
   # == Trajectory Functions ==
   def simulate_one_trajectory(
-      self, pro_q_func, adv_q_func, T=250, state=None, keepOutOf=False, toEnd=False
+      self, pro_q_func, T=250, state=None, keepOutOf=False, toEnd=False
   ):
     """Simulates the trajectory given the state or randomly initialized.
 
@@ -745,8 +752,9 @@ class ZermeloShowEnv(gym.Env):
     if state is None:
       state = self.sample_random_state(sample_inside_obs=not keepOutOf)
     x, y = state[:2]
-    traj_x = [x]
-    traj_y = [y]
+    state_traj = [state]
+    traj_val = []
+    control_traj = []
     result = 0  # not finished
 
     for _ in range(T):
@@ -778,14 +786,19 @@ class ZermeloShowEnv(gym.Env):
 
       u_tot = u + d
 
-      state, _ = self.integrate_forward(state, u_tot)
-      traj_x.append(state[0])
-      traj_y.append(state[1])
+      l_x = self.target_margin(state[:2])
+      g_x = self.safety_margin(state[:2])
+      value = max(l_x, g_x)
+      traj_val.append(value)
 
-    return traj_x, traj_y, result
+      state, _ = self.integrate_forward(state, u_tot)
+      state_traj.append(state)
+      control_traj.append(u)
+
+    return np.array(state_traj), np.array(result), np.array(traj_val), np.array(control_traj)
 
   def simulate_trajectories(
-      self, pro_q_func, adv_q_func, T=250, num_rnd_traj=None, states=None, toEnd=False
+      self, pro_q_func, T=250, num_rnd_traj=None, states=None, toEnd=False
   ):
     """
     Simulates the trajectories. If the states are not provided, we pick the
@@ -808,52 +821,57 @@ class ZermeloShowEnv(gym.Env):
     """
 
     assert ((num_rnd_traj is None and states is not None)
-            or (num_rnd_traj is not None and states is None)
-            or (len(states) == num_rnd_traj))
+                or (num_rnd_traj is not None and states is None)
+                or (len(states) == num_rnd_traj))
     trajectories = []
+    state_hist = []
+    control_hist = []
+    values = []
 
     if states is None:
-      if self.envType == 'basic' or self.envType == 'easy':
-        nx = 21
-        ny = 61
-      else:
         nx = 41
-        ny = nx
-      xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
-      ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
-      results = np.empty((nx, ny), dtype=int)
-      it = np.nditer(results, flags=['multi_index'])
-      print()
-      while not it.finished:
-        idx = it.multi_index
-        print(idx, end='\r')
-        x = xs[idx[0]]
-        y = ys[idx[1]]
-        state = np.array([x, y])
-        traj_x, traj_y, result = self.simulate_one_trajectory(
-            pro_q_func, adv_q_func, T=T, state=state, toEnd=toEnd
-        )
-        trajectories.append((traj_x, traj_y))
-        results[idx] = result
-        it.iternext()
-      results = results.reshape(-1)
+        ny = 100
+        xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
+        ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
+        results = np.empty((nx, ny), dtype=int)
+        it = np.nditer(results, flags=['multi_index'])
+        print()
+        while not it.finished:
+            idx = it.multi_index
+            print(idx, end='\r')
+            x = xs[idx[0]]
+            y = ys[idx[1]]
+            # state = np.array([x, y, 0])
+            state = np.array([x, y])
+            state_traj, result, traj_val, control_traj = self.simulate_one_trajectory(
+                pro_q_func, T=T, state=state, toEnd=toEnd
+            )
+            values.append(traj_val)
+            state_hist.append(state_traj)
+            control_hist.append(control_traj)
+            results[idx] = result
+            it.iternext()
+        results = results.reshape(-1)
     else:
-      results = np.empty(shape=(len(states),), dtype=int)
-      for idx, state in enumerate(states):
-        traj_x, traj_y, result = self.simulate_one_trajectory(
-            pro_q_func, adv_q_func, T=T, state=state, toEnd=toEnd
-        )
-        trajectories.append((traj_x, traj_y))
-        results[idx] = result
+        results = np.empty(shape=(len(states),), dtype=int)
+        for idx, state in enumerate(states):
+            state_traj, result, traj_val, control_traj = self.simulate_one_trajectory(
+                pro_q_func, T=T, state=state, toEnd=toEnd
+            )
+            print(len(state_traj), idx)
+            values.append(traj_val)
+            state_hist.append(state_traj)
+            control_hist.append(control_traj)
+            results[idx] = result
 
-    return trajectories, results
+    return state_hist, results, values, control_hist
 
   # == Visualizing ==
   def render(self):
     pass
 
   def visualize(
-      self, pro_q_func, adv_q_func, vmin=-1, vmax=1, nx=201, ny=201, labels=None,
+      self, pro_q_func, vmin=-1, vmax=1, nx=201, ny=201, labels=None,
       boolPlot=False, addBias=False, cmap='seismic'
   ):
     """
@@ -890,7 +908,7 @@ class ZermeloShowEnv(gym.Env):
 
     # == Plot Trajectories ==
     self.plot_trajectories(
-        pro_q_func, adv_q_func, states=self.visual_initial_states, toEnd=False, ax=ax
+        pro_q_func, states=self.visual_initial_states, toEnd=False, ax=ax
     )
 
     # == Formatting ==
@@ -945,7 +963,7 @@ class ZermeloShowEnv(gym.Env):
         cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=16)
 
   def plot_trajectories(
-      self, pro_q_func, adv_q_func, T=250, num_rnd_traj=None, states=None, toEnd=False,
+      self, pro_q_func, T=250, num_rnd_traj=None, states=None, toEnd=False,
       ax=None, c='k', lw=2, zorder=2
   ):
     """Plots trajectories given the agent's Q-network.
@@ -971,14 +989,46 @@ class ZermeloShowEnv(gym.Env):
             or (num_rnd_traj is not None and states is None)
             or (len(states) == num_rnd_traj))
 
-    trajectories, results = self.simulate_trajectories(
-        pro_q_func, adv_q_func, T=T, num_rnd_traj=num_rnd_traj, states=states, toEnd=toEnd
+    trajectories, results, values, controls = self.simulate_trajectories(
+        pro_q_func, T=T, num_rnd_traj=num_rnd_traj, states=states, toEnd=toEnd
     )
 
-    for traj in trajectories:
-      traj_x, traj_y = traj
-      ax.scatter(traj_x[0], traj_y[0], s=48, c=c, zorder=zorder)
-      ax.plot(traj_x, traj_y, color=c, linewidth=lw, zorder=zorder)
+    # Build a shared normalizer across all trajectories so colors are comparable
+    all_vals = np.concatenate(values)
+    vmin_traj = all_vals.min()
+    vmax_traj = all_vals.max()
+    center_traj = (vmax_traj + vmin_traj) / 2.0 
+    norm      = mcolors.TwoSlopeNorm(vmin=vmin_traj, vcenter=center_traj, vmax=vmax_traj)
+    cmap      = cm.get_cmap('RdYlGn_r')
+
+    # for traj in trajectories:
+    #   traj_x, traj_y = traj
+    #   ax.scatter(traj_x[0], traj_y[0], s=48, c=c, zorder=zorder)
+    #   ax.plot(traj_x, traj_y, color=c, linewidth=lw, zorder=zorder)
+
+    for traj, traj_vals in zip(trajectories, values):
+      traj = np.array(traj) 
+      traj_x, traj_y = traj[:, :2].T
+
+      # Build (N-1) segments: each segment is [[x0,y0],[x1,y1]]
+      points   = np.array([traj_x, traj_y]).T                  # (N, 2)
+      segments = np.stack([points[:-1], points[1:]], axis=1)   # (N-1, 2, 2)
+
+      # Color each segment by the value at its start point
+      seg_vals = traj_vals[:-1]
+
+      lc = LineCollection(segments, cmap=cmap, norm=norm, linewidth=lw, zorder=zorder)
+      lc.set_array(seg_vals)
+      ax.add_collection(lc)
+
+      # Start point marker colored by initial value
+      ax.scatter(traj_x[0], traj_y[0], s=48, zorder=zorder,
+                color=cmap(norm(traj_vals[0])))
+
+    # Shared colorbar — add once to the figure
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, label=r'$\hat{V}(s)$', pad=0.01, fraction=0.05, shrink=0.9, location='left')
 
     return results
 
@@ -1010,7 +1060,7 @@ class ZermeloShowEnv(gym.Env):
           zorder=zorder
       )
 
-  def plot_reach_avoid_set(self, ax=None, c='g', lw=3, zorder=1):
+  def plot_reach_avoid_set(self, ax=None, c='c', lw=3, zorder=1):
     """Plots the analytic reach-avoid set.
 
     Args:

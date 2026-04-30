@@ -36,7 +36,7 @@ for i, combo in enumerate(combinations):
     flag_str = "_".join(k for k, v in zip(keys, combo) if v) or "all_false"
     run_name = f"run_{i:02d}_{flag_str}"
     run_config["file"]["name"] = run_name
-    run_config["file"]["outFolder"] = os.path.join("experiments", "sweep")
+    run_config["file"]["outFolder"] = os.path.join("experiments", "sweep", "ensemble")
     run_config["file"]["storeFigure"] = True
     run_config["file"]["plotFigure"] = False
 
@@ -50,7 +50,7 @@ for i, combo in enumerate(combinations):
     print(f"  Flags: { {k: v for k, v in zip(keys, combo)} }")
 
     proc = subprocess.Popen(
-        ["python", "sim_new_point_mass.py", "--config", tmp_config_path],
+        ["python", "sim_ensemble.py", "--config", tmp_config_path],
         stdout=log_file,
         stderr=log_file,
     )

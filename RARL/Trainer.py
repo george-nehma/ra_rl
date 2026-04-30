@@ -17,6 +17,7 @@ Here we aim to minimize the reach-avoid cost, given by the Bellman backup:
 import torch
 import torch.nn as nn
 from torch.nn.functional import mse_loss, smooth_l1_loss
+from torch.utils.tensorboard import SummaryWriter
 
 from collections import namedtuple
 import numpy as np
@@ -58,7 +59,7 @@ class Trainer():
     """
     self.memory.update(Transition(*args))
 
-  def initBuffer(self, env, protagonist, adversary):
+  def initBuffer(self, env, protagonist):
     """Adds some transitions to the replay memory (buffer) randomly.
 
     Args:
@@ -75,7 +76,7 @@ class Trainer():
       d_idx = protagonist.select_action(s, env, agent= 'adv', explore=True)
     #   d_idx = adversary.select_action(np.concatenate([s, [u_idx]]), explore=True)
     #   u, d, u_idx, d_idx = self.select_action(s, explore=True)
-      s_, r, done, info = env.step((u_idx, d_idx))
+      s_, r, done, _, info = env.step((u_idx, d_idx))
       s_ = None if done else s_
       u_idx_next = None if done else protagonist.select_action(s_, env, agent= 'pro', explore=True)
       self.store_transition(s, u_idx, d_idx, r, s_, u_idx_next, info)
@@ -155,11 +156,11 @@ class Trainer():
     return lossList
 
   def learn(
-      self, protagonist, adversary, env, MAX_UPDATES=2000000, MAX_EP_STEPS=100, warmupBuffer=True,
+      self, protagonist, env, MAX_UPDATES=2000000, MAX_EP_STEPS=100, warmupBuffer=True,
       warmupQ=False, warmupIter=10000, addBias=False, doneTerminate=True,
       runningCostThr=None, curUpdates=None, checkPeriod=50000, plotFigure=True,
-      storeFigure=False, showBool=False, vmin=-1, vmax=1, numRndTraj=200,
-      storeModel=True, storeBest=False, outFolder="AARA", verbose=True
+      storeFigure=False, plotTrainValue=True, showBool=False, vmin=-1, vmax=1, numRndTraj=200,
+      storeModel=True, storeBest=True, outFolder="AARA", verbose=True
   ):
     """Learns the Q function given the training hyper-parameters.
 
@@ -214,7 +215,7 @@ class Trainer():
     # == Warmup Buffer ==
     startInitBuffer = time.time()
     if warmupBuffer:
-      self.initBuffer(env, protagonist, adversary)
+      self.initBuffer(env, protagonist)
     endInitBuffer = time.time()
 
     # == Warmup Q ==
@@ -225,6 +226,8 @@ class Trainer():
     #       plotFigure=plotFigure, storeFigure=storeFigure, vmin=vmin, vmax=vmax
     #   )
     # endInitQ = time.time()
+
+    logger = SummaryWriter(log_dir=os.path.join(outFolder, "logs"))
 
     # == Main Training ==
     startLearning = time.time()
@@ -241,8 +244,8 @@ class Trainer():
     if storeModel:
       pro_modelFolder = os.path.join(outFolder, "pro_model")
       os.makedirs(pro_modelFolder, exist_ok=True)
-      adv_modelFolder = os.path.join(outFolder, "adv_model")
-      os.makedirs(adv_modelFolder, exist_ok=True)
+    #   adv_modelFolder = os.path.join(outFolder, "adv_model")
+    #   os.makedirs(adv_modelFolder, exist_ok=True)
     if storeFigure:
       figureFolder = os.path.join(outFolder, "figure")
       os.makedirs(figureFolder, exist_ok=True)
@@ -261,7 +264,7 @@ class Trainer():
         d_idx = protagonist.select_action(s, env, agent='adv', explore=False)
 
         # Interact with env
-        s_, r, done, info = env.step((u_idx, d_idx))
+        s_, r, done, _, info = env.step((u_idx, d_idx))
         s_ = None if done or step_num == MAX_EP_STEPS - 1 else s_
         epCost += r
         # print(s_[1]) if s_ is not None else print("done")
@@ -273,11 +276,9 @@ class Trainer():
         # Check after fixed number of gradient updates
         if protagonist.cntUpdate != 0 and protagonist.cntUpdate % checkPeriod == 0:
           results = env.unwrapped.simulate_trajectories(
-              protagonist.Q_network, adversary.Q_network, T=MAX_EP_STEPS, num_rnd_traj=numRndTraj,
+              protagonist.Q_network, T=MAX_EP_STEPS, num_rnd_traj=numRndTraj,
           )[1]
-        #   results = env.unwrapped.simulate_trajectories(
-        #       protagonist.Q_network, T=MAX_EP_STEPS, num_rnd_traj=numRndTraj,
-        #   )[1]
+        
           success = np.sum(results == 1) / results.shape[0]
           failure = np.sum(results == -1) / results.shape[0]
           unfinish = np.sum(results == 0) / results.shape[0]
@@ -286,8 +287,8 @@ class Trainer():
             lr = protagonist.optimizer.state_dict()["param_groups"][0]["lr"]
             print("\nAfter [{:d}] updates:".format(protagonist.cntUpdate))
             print(
-                "  - eps={:.2f}, gamma={:.6f}, protagonist lr={:.1e}.".format(
-                    protagonist.EPSILON, protagonist.GAMMA, lr
+                "  - epi_uncertainty={:.2f}, eps={:.2f}, gamma={:.6f}, protagonist lr={:.1e}.".format(
+                    epistem_uncertainty, protagonist.EPSILON, protagonist.GAMMA, lr
                 )
             )
             print("  - success/failure/unfinished ratio:", end=" ")
@@ -299,29 +300,24 @@ class Trainer():
               if success > checkPointSucc:
                 checkPointSucc = success
                 protagonist.save(protagonist.cntUpdate, pro_modelFolder)
-                adversary.save(protagonist.cntUpdate, adv_modelFolder)
+                # adversary.save(protagonist.cntUpdate, adv_modelFolder)
             else:
               protagonist.save(protagonist.cntUpdate, pro_modelFolder)
-              adversary.save(protagonist.cntUpdate, adv_modelFolder)
+            #   adversary.save(protagonist.cntUpdate, adv_modelFolder)
 
-          if plotFigure or storeFigure:
-            # self.Q_network.eval()
+          if (plotFigure or storeFigure) and plotTrainValue:
+            protagonist.Q_network.eval()
             if showBool:
               env.unwrapped.visualize(
-                  protagonist.Q_network, adversary.Q_network, vmin=0, boolPlot=True, addBias=addBias
+                  protagonist.Q_network, vmin=0, boolPlot=True, addBias=addBias
               )
-            #   env.unwrapped.visualize(
-            #       protagonist.Q_network, vmin=0, boolPlot=True, addBias=addBias
-            #   )
 
             else:
               env.unwrapped.visualize(
-                  protagonist.Q_network, adversary.Q_network, vmin=vmin, vmax=vmax, cmap="seismic",
+                  protagonist.Q_network, vmin=vmin, vmax=vmax, cmap="seismic",
                   addBias=addBias
               )
-            #   env.unwrapped.visualize(
-            #       protagonist.Q_network, vmin=0, boolPlot=False, addBias=addBias
-            #   )
+
 
             if storeFigure:
               figurePath = os.path.join(
@@ -334,13 +330,18 @@ class Trainer():
             plt.close('all')
 
         # Perform one step of the optimization (on the target network)
-        lossC_pro = protagonist.update(addBias=addBias)
-        lossC_adv = adversary.update(addBias=addBias)
-        trainingRecords.append(lossC_pro)
-        trainingRecords.append(lossC_adv)
+        lossC_pro, epistem_uncertainty = protagonist.update(addBias=addBias)
+        # lossC_adv = adversary.update(addBias=addBias)
+        trainingRecords.append([lossC_pro, epistem_uncertainty])
+        # trainingRecords.append(lossC_adv)
         protagonist.cntUpdate += 1
         protagonist.updateHyperParam()
-        adversary.updateHyperParam()
+        # adversary.updateHyperParam()
+
+        logger.add_scalar("Loss/critic", lossC_pro, protagonist.cntUpdate)
+        logger.add_scalar("HyperParam/epsilon_pro", protagonist.EPSILON, protagonist.cntUpdate)
+        logger.add_scalar("HyperParam/gamma_pro", protagonist.GAMMA, protagonist.cntUpdate)
+        logger.add_scalar("Loss/epistem_uncertainty", epistem_uncertainty, protagonist.cntUpdate)
 
         # Terminate early
         if done and doneTerminate:
@@ -365,13 +366,14 @@ class Trainer():
               + " Running cost is now {:3.2f}!".format(runningCost)
           )
           env.close()
+          logger.close()
           break
     endLearning = time.time()
     timeInitBuffer = endInitBuffer - startInitBuffer
     timeInitQ = 0 # endInitQ - startInitQ
     timeLearning = endLearning - startLearning
     protagonist.save(protagonist.cntUpdate, pro_modelFolder)
-    adversary.save(protagonist.cntUpdate, adv_modelFolder)
+    # adversary.save(protagonist.cntUpdate, adv_modelFolder)
     print(
         "\nInitBuffer: {:.1f}, InitQ: {:.1f}, Learning: {:.1f}".format(
             timeInitBuffer, timeInitQ, timeLearning

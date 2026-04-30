@@ -208,16 +208,16 @@ PRO_CONFIG = dqnConfig(
     SIM_MAX_Q=args.simMaxQ
 )
 
-args.architecture = [120,20]
-ADV_CONFIG = ceConfig(
-    DEVICE=device, ENV_NAME=env_name, SEED=args.randomSeed,
-    MAX_UPDATES=maxUpdates, MAX_EP_STEPS=maxSteps, BATCH_SIZE=64,
-    MEMORY_CAPACITY=args.memoryCapacity, ARCHITECTURE=args.architecture,
-    ACTIVATION=args.actType, GAMMA=args.gamma, GAMMA_PERIOD=updatePeriod,
-    GAMMA_END=GAMMA_END, EPS_PERIOD=EPS_PERIOD, EPS_DECAY=0.7,
-    EPS_RESET_PERIOD=EPS_RESET_PERIOD, LR_C=args.learningRate,
-    LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100, NUM_CRITICS=args.numCritic
-)
+# args.architecture = [120,20]
+# ADV_CONFIG = ceConfig(
+#     DEVICE=device, ENV_NAME=env_name, SEED=args.randomSeed,
+#     MAX_UPDATES=maxUpdates, MAX_EP_STEPS=maxSteps, BATCH_SIZE=64,
+#     MEMORY_CAPACITY=args.memoryCapacity, ARCHITECTURE=args.architecture,
+#     ACTIVATION=args.actType, GAMMA=args.gamma, GAMMA_PERIOD=updatePeriod,
+#     GAMMA_END=GAMMA_END, EPS_PERIOD=EPS_PERIOD, EPS_DECAY=0.7,
+#     EPS_RESET_PERIOD=EPS_RESET_PERIOD, LR_C=args.learningRate,
+#     LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8, MAX_MODEL=100, NUM_CRITICS=args.numCritics
+# )
 
 # == TRAINER ==
 trainer = Trainer(PRO_CONFIG)
@@ -239,49 +239,49 @@ if args.warmup:
   )
 
 # == ADVERSARY AGENT ==
-dimList = [stateDim + 1] + ADV_CONFIG.ARCHITECTURE + [actionNum] # +1 for sending the action into the adversary network 
+# dimList = [stateDim + 1] + ADV_CONFIG.ARCHITECTURE + [actionNum] # +1 for sending the action into the adversary network 
 # adversary = CriticEnsemble(
 #     ADV_CONFIG, actionNum, trainer.memory, dimList=dimList, mode=agentMode,
 #     terminalType=args.terminalType
 # )
-adversary = DDQNSingle(
-    ADV_CONFIG, actionNum, trainer.memory, dimList=dimList, mode=agentMode,
-    terminalType=args.terminalType
-)
-print("We want to use: {}, and Agent uses: {}".format(device, adversary.device))
-print("Critic is using cuda: ", next(adversary.Q_network.parameters()).is_cuda)
+# adversary = DDQNSingle(
+#     ADV_CONFIG, actionNum, trainer.memory, dimList=dimList, mode=agentMode,
+#     terminalType=args.terminalType
+# )
+# print("We want to use: {}, and Agent uses: {}".format(device, adversary.device))
+# print("Critic is using cuda: ", next(adversary.Q_network.parameters()).is_cuda)
 
-if args.warmup:
-  print("\n== Warmup Q ==")
-  lossList = adversary.initQ(
-      env, args.warmupIter, outFolder, num_warmup_samples=200, vmin=vmin,
-      vmax=vmax, plotFigure=plotFigure, storeFigure=storeFigure
-  )
+# if args.warmup:
+#   print("\n== Warmup Q ==")
+#   lossList = adversary.initQ(
+#       env, args.warmupIter, outFolder, num_warmup_samples=200, vmin=vmin,
+#       vmax=vmax, plotFigure=plotFigure, storeFigure=storeFigure
+#   )
 
 
 
-  if plotFigure or storeFigure:
-    fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-    tmp = np.arange(500, args.warmupIter)
-    # tmp = np.arange(args.warmupIter)
-    ax.plot(tmp, lossList[tmp], 'b-')
-    ax.set_xlabel('Iteration', fontsize=18)
-    ax.set_ylabel('Loss', fontsize=18)
-    plt.tight_layout()
+#   if plotFigure or storeFigure:
+#     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+#     tmp = np.arange(500, args.warmupIter)
+#     # tmp = np.arange(args.warmupIter)
+#     ax.plot(tmp, lossList[tmp], 'b-')
+#     ax.set_xlabel('Iteration', fontsize=18)
+#     ax.set_ylabel('Loss', fontsize=18)
+#     plt.tight_layout()
 
-    if storeFigure:
-      figurePath = os.path.join(figureFolder, 'initQ_Loss.png')
-      fig.savefig(figurePath)
-    if plotFigure:
-      plt.show()
-      plt.pause(0.001)
-    plt.close()
+#     if storeFigure:
+#       figurePath = os.path.join(figureFolder, 'initQ_Loss.png')
+#       fig.savefig(figurePath)
+#     if plotFigure:
+#       plt.show()
+#       plt.pause(0.001)
+#     plt.close()
 
 print("\n== Training Information ==")
 vmin = -1 * args.scaling
 vmax = 1 * args.scaling
 checkPeriod = args.checkPeriod
-trainRecords, trainProgress = trainer.learn(protagonist, adversary,
+trainRecords, trainProgress = trainer.learn(protagonist,
     env, MAX_UPDATES=maxUpdates, MAX_EP_STEPS=maxSteps, warmupQ=False,
     doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
     checkPeriod=checkPeriod, outFolder=outFolder, plotFigure=args.plotFigure,
@@ -329,8 +329,8 @@ if plotFigure or storeFigure:
   idx = np.argmax(trainProgress[:, 0]) + 1
   successRate = np.amax(trainProgress[:, 0])
   print('We pick model with success rate-{:.3f}'.format(successRate))
-  protagonist.restore(idx * args.checkPeriod, outFolder, prefix="pro_")
-  adversary.restore(idx * args.checkPeriod, outFolder, prefix="adv_")
+  protagonist.restore(idx * args.checkPeriod, outFolder, prefix="pro_model")
+#   adversary.restore(idx * args.checkPeriod, outFolder, prefix="adv_model")
 
   nx = 41
   ny = 121
@@ -361,7 +361,7 @@ if plotFigure or storeFigure:
     disturbDistMtx[idx] = disturb_index
 
     _, _, result = env.unwrapped.simulate_one_trajectory(
-        protagonist.Q_network, adversary.Q_network, T=250, state=state
+        protagonist.Q_network, T=250, state=state
     )
     
     g_x = env.unwrapped.safety_margin(state)
@@ -387,9 +387,9 @@ if plotFigure or storeFigure:
                    actDistMtx=actDistMtx, disturbDistMtx=disturbDistMtx, figureFolder=figureFolder, 
                    plotFigure=plotFigure, storeFigure=storeFigure, actionNum=actionNum)
 
-  plot_RA_eval(env, protagonist, adversary, cfg)
+  plot_RA_eval(env, protagonist, cfg)
 
-  plot_protagonist_adversary_actions(env, protagonist, adversary, cfg)
+  plot_protagonist_adversary_actions(env, cfg)
 
 #   plot_protagonist_adversary_values(env, protagonist, adversary, cfg)
   

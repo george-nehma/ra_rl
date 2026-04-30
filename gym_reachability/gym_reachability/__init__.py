@@ -49,3 +49,8 @@ register(
     id="point_mass-v1",
     entry_point="gym_reachability.gym_reachability.envs:PointMass2Env"
 )
+
+register(
+    id="cont-obs-avoid-v0",
+    entry_point="gym_reachability.gym_reachability.envs:ContinuousObsAvoidEnv"
+)

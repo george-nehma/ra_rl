@@ -213,18 +213,33 @@ def visualize_state_visits(state_visits):
   plt.show()
 
 
-def plot_RA_eval(env, protagonist, adversary, cfg: PlotConfig):
+def plot_RA_eval(env, sacAgent, cfg: PlotConfig):
 
-  fig, axes = plt.subplots(1, 3, figsize=(12, 5), sharex=True, sharey=True)
+  if env.unwrapped.action_space.shape == ():
+    num_plt = 3
+  else:
+    num_plt = env.unwrapped.action_space.shape[0] + env.unwrapped.disturbance_space.shape[0] + 2
+    a_scale = env.unwrapped.act_bound[0]
+  fig, axes = plt.subplots(int(np.ceil(num_plt/2)), 2, figsize=(8, 5*int(np.ceil(num_plt/2))), sharex=True, sharey=True)
   axStyle = env.unwrapped.get_axes()
+  axes = axes.flatten()
 
-  # = Action
-  ax = axes[2]
+  # = Value
+  ax = axes[0]
+  _, _, v = env.unwrapped.get_value(sacAgent, cfg.nx, cfg.ny)
   im = ax.imshow(
-      cfg.actDistMtx.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=0, vmax=cfg.actionNum - 1, zorder=-1
+      v.T, interpolation='none', extent=axStyle[0], origin="lower",
+      cmap='seismic', vmin=cfg.vmin, vmax=cfg.vmax, zorder=-1
   )
-  ax.set_xlabel('Action', fontsize=24)
+  CS = ax.contour(
+      cfg.xs, cfg.ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
+  )
+  cbar = fig.colorbar(
+                    im, ax=ax, pad=0.01, fraction=0.05, shrink=.95,
+                    ticks=[cfg.vmin, 0, cfg.vmax]
+                )
+  cbar.ax.set_yticklabels(labels=[cfg.vmin, 0, cfg.vmax], fontsize=16)
+  ax.set_xlabel('Value', fontsize=24)
 
   # = Rollout
   ax = axes[1]
@@ -233,37 +248,63 @@ def plot_RA_eval(env, protagonist, adversary, cfg: PlotConfig):
       origin="lower", cmap='seismic', vmin=0, vmax=1, zorder=-1
   )
   env.unwrapped.plot_trajectories(
-      protagonist.Q_network, adversary.Q_network, states=env.unwrapped.visual_initial_states, ax=ax,
+      sacAgent, states=env.unwrapped.visual_initial_states, ax=ax,
       c='w', lw=1.5
   )
   ax.set_xlabel('Rollout RA', fontsize=24)
 
-  # = Value
-  ax = axes[0]
-  _, _, v = env.unwrapped.get_value(protagonist.Q_network, cfg.nx, cfg.ny)
-  im = ax.imshow(
-      v.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=cfg.vmin, vmax=cfg.vmax, zorder=-1
-  )
-  CS = ax.contour(
-      cfg.xs, cfg.ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
-  )
-  ax.set_xlabel('Value', fontsize=24)
-#   fig.subplots_adjust(right=0.8)
+  # = Action
+  if env.unwrapped.action_space.shape != ():
+    for i in range(2, num_plt):
+      ax = axes[i]
 
-  for ax in axes:
-    env.unwrapped.plot_target_failure_set(ax=ax)
-    env.unwrapped.plot_reach_avoid_set(ax=ax)
-    env.unwrapped.plot_formatting(ax=ax)
+      # row index (0 or 1)
+      k = (i - 2) // 2        # 0 for row 2, 1 for row 3
 
-  # Add action legend AFTER the env calls (which overwrite legends)
-  cmap = plt.get_cmap('seismic')
-  action_handles = [
-    mpatches.Patch(color=cmap(0.0), label='-1 (Left)'),
-    mpatches.Patch(color=cmap(0.5), label='0 (Do Nothing)'),
-    mpatches.Patch(color=cmap(1.0), label='1 (Right)'),
-  ]
-  axes[2].legend(handles=action_handles, loc='upper center', bbox_to_anchor=(0.5, 1.3))
+      if i % 2 == 0:
+          # Action distribution plot
+          im = ax.imshow(
+              cfg.actDistMtx[:, :, k].T,
+              interpolation='none',
+              extent=axStyle[0],
+              origin="lower",
+              cmap='seismic',
+              vmin=-a_scale,
+              vmax=a_scale,
+              zorder=-1
+          )
+          ax.set_xlabel(f"Action {k}", fontsize=24)
+
+      else:
+          # Disturbance distribution plot
+          im = ax.imshow(
+              cfg.disturbDistMtx[:, :, k].T,
+              interpolation='none',
+              extent=axStyle[0],
+              origin="lower",
+              cmap='seismic',
+              vmin=-a_scale,
+              vmax=a_scale,
+              zorder=-1
+          )
+          ax.set_xlabel(f"Disturbance {k}", fontsize=24)
+    for ax in axes:
+      env.unwrapped.plot_target_failure_set(ax=ax)
+      # env.unwrapped.plot_reach_avoid_set(ax=ax)
+      env.unwrapped.plot_formatting(ax=ax)
+
+    # Add action legend AFTER the env calls (which overwrite legends)
+    cmap = plt.get_cmap('seismic')
+    action_handles = [
+      mpatches.Patch(color=cmap(-a_scale), label='(Left)'),
+      mpatches.Patch(color=cmap(a_scale), label='(Right)'),
+    ]
+    axes[2].legend(handles=action_handles, loc='upper center', bbox_to_anchor=(0.5, 1))
+    action_handles = [
+      mpatches.Patch(color=cmap(-a_scale), label='(Down)'),
+      mpatches.Patch(color=cmap(a_scale), label='(Up)'),
+    ]
+    axes[4].legend(handles=action_handles, loc='upper center', bbox_to_anchor=(0.5, 1))
 
   fig.tight_layout()
   if cfg.storeFigure:
@@ -275,39 +316,43 @@ def plot_RA_eval(env, protagonist, adversary, cfg: PlotConfig):
   # plt.close()
 
 
-def plot_protagonist_adversary_actions(env, protagonist, adversary, cfg: PlotConfig):
+# not needed for continuous actions
+def plot_protagonist_adversary_actions(env, cfg: PlotConfig):
 
-  fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharex=True, sharey=True)
+  d_scale = env.unwrapped.d_bound[0]
+  a_scale = env.unwrapped.act_bound[0]
+  num_plt = env.unwrapped.action_space.shape[0] + env.unwrapped.disturbance_space.shape[0]
+  fig, axes = plt.subplots(int(np.ceil(num_plt/2)), 2, figsize=(int(np.ceil(num_plt/2))*4, 4), sharex=True, sharey=True)
   axStyle = env.unwrapped.get_axes()
 
-  # = Action
-  ax = axes[1]
-  im = ax.imshow(
-      cfg.disturbDistMtx.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=0, vmax=cfg.actionNum - 1, zorder=-1
-  )
-  ax.set_xlabel('Adversary Action', fontsize=20)
+  # = Disturbance
+  for i in range(env.unwrapped.action_space.shape[0]):
+    ax = axes[i*2]
+    im = ax.imshow(
+        cfg.disturbDistMtx[:,:,i].T, interpolation='none', extent=axStyle[0], origin="lower",
+        cmap='seismic', vmin=-d_scale, vmax=d_scale, zorder=-1
+    )
+    ax.set_xlabel('Adversary Action', fontsize=20)
 
   # = Action
-  ax = axes[0]
-  im = ax.imshow(
-      cfg.actDistMtx.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=0, vmax=cfg.actionNum - 1, zorder=-1
-  )
+    ax = axes[i*2 + 1]
+    im = ax.imshow(
+        cfg.actDistMtx[:,:,i].T, interpolation='none', extent=axStyle[0], origin="lower",
+        cmap='seismic', vmin=-a_scale, vmax=a_scale, zorder=-1
+    )
 
   ax.set_xlabel('Protagonist Action', fontsize=20)
 
   for ax in axes:
     env.unwrapped.plot_target_failure_set(ax=ax)
-    env.unwrapped.plot_reach_avoid_set(ax=ax)
+    # env.unwrapped.plot_reach_avoid_set(ax=ax)
     env.unwrapped.plot_formatting(ax=ax)
 
   # Add action legend AFTER the env calls (which overwrite legends)
   cmap = plt.get_cmap('seismic')
   action_handles = [
-    mpatches.Patch(color=cmap(0.0), label='-1 (Left)'),
-    mpatches.Patch(color=cmap(0.5), label='0 (Do Nothing)'),
-    mpatches.Patch(color=cmap(1.0), label='1 (Right)'),
+    mpatches.Patch(color=cmap(-a_scale), label='(Left)'),
+    mpatches.Patch(color=cmap(a_scale), label='(Right)'),
   ]
   axes[0].legend(handles=action_handles, loc='center right', bbox_to_anchor=(1.6, 0.5), framealpha=1.0)
 
@@ -322,14 +367,14 @@ def plot_protagonist_adversary_actions(env, protagonist, adversary, cfg: PlotCon
 
 
 
-def plot_protagonist_adversary_values(env, protagonist, adversary, cfg:PlotConfig):
+def plot_protagonist_adversary_values(env, sacAgent, cfg:PlotConfig):
 
   fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharex=True, sharey=True)
   axStyle = env.unwrapped.get_axes()
 
   # = Adversary Value
   ax = axes[1]
-  _, _, v = env.unwrapped.get_value(adversary.Q_network, cfg.nx, cfg.ny, pro_q_func=protagonist.Q_network)
+  _, _, v = env.unwrapped.get_value(sacAgent, cfg.nx, cfg.ny)
   im = ax.imshow(
       v.T, interpolation='none', extent=axStyle[0], origin="lower",
       cmap='seismic', vmin=cfg.vmin, vmax=cfg.vmax, zorder=-1
@@ -338,23 +383,23 @@ def plot_protagonist_adversary_values(env, protagonist, adversary, cfg:PlotConfi
   CS = ax.contour(
       cfg.xs, cfg.ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
   )
-  ax.set_xlabel('Adversary Value', fontsize=20)
+  ax.set_xlabel('Critic Value', fontsize=20)
 
   # = Protagonist Value
-  ax = axes[0]
-  _, _, v = env.unwrapped.get_value(protagonist.Q_network, cfg.nx, cfg.ny)
-  im = ax.imshow(
-      v.T, interpolation='none', extent=axStyle[0], origin="lower",
-      cmap='seismic', vmin=cfg.vmin, vmax=cfg.vmax, zorder=-1
-  )
-  CS = ax.contour(
-      cfg.xs, cfg.ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
-  )
-  ax.set_xlabel('Protagonist Value', fontsize=20)
+  # ax = axes[0]
+  # _, _, v = env.unwrapped.get_value(sacAgent, cfg.nx, cfg.ny)
+  # im = ax.imshow(
+  #     v.T, interpolation='none', extent=axStyle[0], origin="lower",
+  #     cmap='seismic', vmin=cfg.vmin, vmax=cfg.vmax, zorder=-1
+  # )
+  # CS = ax.contour(
+  #     cfg.xs, cfg.ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
+  # )
+  # ax.set_xlabel('Protagonist Value', fontsize=20)
 
   for ax in axes:
     env.unwrapped.plot_target_failure_set(ax=ax)
-    env.unwrapped.plot_reach_avoid_set(ax=ax)
+    # env.unwrapped.plot_reach_avoid_set(ax=ax)
     env.unwrapped.plot_formatting(ax=ax)
 
   fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04, shrink=0.8)
@@ -455,7 +500,7 @@ def compare_against_rollout(horizon, n_samples, q_func, env):
     for t in itertools.count():
       if done or t >= horizon:
         break
-      s, r, done, info = env.step(np.argmax(q_values))
+      s, r, done, _, info = env.step(np.argmax(q_values))
       actual = min(actual, r)
       q_values = q_func(s)
     rollout_comparisons.append((float(actual), float(predicted)))
@@ -485,7 +530,7 @@ def eval_violation(time_horizon, n_samples, q_values, env):
   for _ in range(n_samples):
     s = env.reset()
     for t in range(time_horizon):
-      s, r, done, info = env.step(np.argmax(q_values(s)))
+      s, r, done, _, info = env.step(np.argmax(q_values(s)))
       if r <= 0:
         violations += 1
         break

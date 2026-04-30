@@ -1,38 +1,33 @@
 """
 DDQNEnsemble.py
 ---------------
-Protagonist critic ensemble for reach-avoid RL epistemic uncertainty estimation.
+Protagonist critic ensemble — drop-in replacement for DDQNSingle in the
+protagonist role. Designed to match the exact API that Trainer.py expects.
 
-Designed as a **drop-in replacement** for ``DDQNSingle`` in the protagonist role,
-matching the exact constructor signature and method interface that ``Trainer``
-expects. The adversary (``CriticEnsemble``) is left completely untouched.
+Diversification: random weight-init seeds only (seed_i = base_seed + i).
+All critics share the same replay buffer (trainer.memory) so they see
+identical data and diverge purely from their different initializations
+(Deep Ensembles, Lakshminarayanan et al. 2017).
 
-Architecture
-------------
-* N independent ``DDQNSingle`` critics, all sharing the **same replay buffer**
-  (``trainer.memory``), diversified by random weight-init seed only
-  (seed_i = base_seed + i).
-* A ``MeanEnsembleNet`` wraps all critic Q_networks into a single nn.Module
-  exposed as ``self.Q_network`` / ``self.Q_target``. This lets ``Trainer``
-  use the protagonist exactly as before for rollout, Bellman target
-  computation, and evaluation.
-* ``update_one_step`` updates **all** critics on the same batch. Each critic
-  uses its own internal target network, so they diverge over time despite
-  seeing identical data — pure seed diversification as requested.
+Trainer API surface honoured
+-----------------------------
+    protagonist.cntUpdate           – synced property across all critics
+    protagonist.EPSILON             – forwarded to critics[0]
+    protagonist.GAMMA               – forwarded to critics[0]
+    protagonist.optimizer           – forwarded to critics[0]  (for lr logging)
+    protagonist.select_action(s, env, agent=..., explore=...)
+    protagonist.update(addBias=False)      – fans out, returns mean loss
+    protagonist.updateHyperParam()         – fans out to all critics
+    protagonist.save(cntUpdate, folder)    – saves each critic to folder/critic_i/
+    protagonist.restore(n, folder, prefix) – restores each critic
+    protagonist.initQ(env, n, folder, ...) – warms up each critic
+    protagonist.Q_network                  – MeanEnsembleNet (nn.Module)
+    protagonist.target_network             – MeanEnsembleNet (nn.Module)
 
-Uncertainty outputs (``get_uncertainty``)
------------------------------------------
-    var_q                - per-action Q variance across critics
-    min_q                - conservative (pessimistic) Q  [safety lower-bound]
-    mean_q               - mean Q  (same as Q_network forward)
-    epistemic_uncertainty-scalar per state: mean(var_q) over action dim
-    safe_disagreement    - critic disagreement on safe/unsafe classification
-
-SAC upgrade path
+SAC upgrade note
 ----------------
-The adversary ``CriticEnsemble`` is untouched. When you convert to SAC, the
-protagonist's discrete Q_network becomes a continuous actor + value head. At
-that point, replace ``DDQNSingle`` inside the loop here with your SAC critic.
+When converting to SAC, replace DDQNSingle inside the critic loop with a
+SAC critic. The adversary (DDQNSingle) and Trainer are left unchanged.
 
 Authors: George Nehma (ensemble extension)
          Original DDQN/RARL: Kai-Chieh Hsu, Vicenç Rubies-Royo
@@ -49,20 +44,23 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from RARL.DDQNSingle import DDQNSingle
 from RARL.utils import save_obj
+from .DDQN import Transition
 
 
 # ---------------------------------------------------------------------------
-# MeanEnsembleNet — unified nn.Module for inference
+# MeanEnsembleNet
 # ---------------------------------------------------------------------------
 
 class MeanEnsembleNet(nn.Module):
     """
-    Wraps N networks and returns their mean output via ``forward(x)``.
+    Wraps N networks; forward(x) returns their mean output.
 
-    Registered as an ``nn.ModuleList`` so ``parameters()`` and ``.is_cuda``
-    checks work exactly as they would on a plain ``Q_network``.
+    Registered as nn.ModuleList so next(parameters()).is_cuda and any
+    other nn.Module checks work identically to a plain Q_network.
     """
 
     def __init__(self, networks: List[nn.Module]):
@@ -74,7 +72,7 @@ class MeanEnsembleNet(nn.Module):
         return torch.stack([net(x) for net in self.networks], dim=0).mean(dim=0)
 
     def stack(self, x: torch.Tensor) -> torch.Tensor:
-        """(K, B, A) — raw per-critic outputs without averaging."""
+        """(K, B, A) — raw per-critic outputs, no averaging."""
         return torch.stack([net(x) for net in self.networks], dim=0)
 
 
@@ -84,23 +82,22 @@ class MeanEnsembleNet(nn.Module):
 
 class DDQNEnsemble:
     """
-    Protagonist critic ensemble — drop-in for ``DDQNSingle``.
+    Protagonist critic ensemble — drop-in for DDQNSingle.
 
     Parameters
     ----------
     config : ceConfig
-        Ensemble config. ``config.NUM_CRITICS`` sets the ensemble size.
-        Each critic gets a deep copy with ``SEED = config.SEED + i``.
+        config.NUM_CRITICS sets ensemble size.
+        Each critic gets a deep copy with SEED = config.SEED + i.
     actionNum : int
-        Cardinality of the discrete action space.
     memory : ReplayMemory
-        Shared replay buffer from ``Trainer`` (pass ``trainer.memory``).
+        Shared buffer from Trainer (pass trainer.memory).
     dimList : list[int]
-        ``[state_dim, *hidden_sizes, action_num]``.
+        [state_dim, *hidden, action_num]
     mode : str
-        RL mode — ``'AARA'`` (default) or ``'RA'``.
+        'AARA' (default) or 'RA'.
     terminalType : str
-        Terminal value convention — ``'max'`` (default) or ``'g'``.
+        'max' (default) or 'g'.
     """
 
     def __init__(
@@ -111,6 +108,7 @@ class DDQNEnsemble:
         dimList: List[int],
         mode: str = 'AARA',
         terminalType: str = 'max',
+        n_workers: int = None,
     ):
         self.config       = config
         self.actionNum    = actionNum
@@ -120,8 +118,9 @@ class DDQNEnsemble:
         self.terminalType = terminalType
         self.num_critics  = config.NUM_CRITICS
         self.base_seed    = config.SEED
+        self.n_workers    = n_workers if n_workers is not None else self.num_critics
 
-        # --- build N independent critics ------------------------------------
+        # Build N independent critics
         self.critics: List[DDQNSingle] = []
         for i in range(self.num_critics):
             cfg_i      = copy.deepcopy(config)
@@ -138,125 +137,172 @@ class DDQNEnsemble:
 
         self.device = self.critics[0].device
 
-        # --- unified inference networks -------------------------------------
-        # Trainer and simulate_one_trajectory see a single nn.Module here.
-        self.Q_network = MeanEnsembleNet(
-            [c.Q_network for c in self.critics]
-        )
-        self.Q_target = MeanEnsembleNet(
-            [c.Q_target for c in self.critics]
-        )
+        # Thread pool — one worker per critic, reused across all update() calls.
+        # PyTorch releases the GIL during tensor ops so threads genuinely
+        # run in parallel on separate cores.
+        self._executor = ThreadPoolExecutor(max_workers=self.n_workers)
+
+        # Unified inference modules — what Trainer / env see as Q_network
+        self.Q_network = MeanEnsembleNet([c.Q_network for c in self.critics])
+        self.Q_target  = MeanEnsembleNet([c.target_network  for c in self.critics])
 
     # ------------------------------------------------------------------
-    # Trainer-facing API  (mirrors DDQNSingle public interface)
+    # Trainer-facing API
     # ------------------------------------------------------------------
 
-    def update_one_step(self, batch):
-        """
-        Update **all** critics on the same batch.
+    # --- cntUpdate: must stay synced so Trainer's while-loop and
+    #     per-critic updateHyperParam() schedules all stay aligned -------
 
-        Each critic's own target network computes its Bellman target
-        independently, so critics diverge from their different inits.
-        Returns mean loss across critics (compatible with Trainer logging).
-        """
-        losses = [c.update_one_step(batch) for c in self.critics]
-        return float(np.mean(losses))
+    @property
+    def cntUpdate(self):
+        return self.critics[0].cntUpdate
 
-    def initQ(self, env, warmupIter, outFolder, **kwargs):
-        """
-        Supervised warmup for every critic. Each writes to its own sub-folder
-        so checkpoints don't collide. Returns the last critic's loss array
-        so the existing warmup-loss plot in sim_new_point_mass.py works
-        without any changes.
-        """
-        all_losses = []
-        for i, critic in enumerate(self.critics):
-            sub = os.path.join(outFolder, f"critic_{i:02d}")
-            os.makedirs(sub, exist_ok=True)
-            all_losses.append(critic.initQ(env, warmupIter, sub, **kwargs))
-        return all_losses[-1]
+    @cntUpdate.setter
+    def cntUpdate(self, value):
+        for c in self.critics:
+            c.cntUpdate = value
 
-    def restore(self, num_updates: int, outFolder: str, prefix: str = "pro_") -> None:
-        """
-        Restore checkpoint for every critic.
+    # --- epsilon / gamma: forward reads to critics[0]; keep all in sync
+    #     on writes so exploration is consistent --------------------------
 
-        Prefixes are made unique per critic — e.g. with ``prefix="pro_"``:
-            critic 0 → ``pro_critic_0_``
-            critic 1 → ``pro_critic_1_``
-        so files never collide with the adversary (``adv_``) or each other.
-        """
-        for i, critic in enumerate(self.critics):
-            critic.restore(
-                num_updates,
-                outFolder,
-                prefix=f"{prefix}critic_{i}_",
-            )
+    @property
+    def EPSILON(self):
+        return self.critics[0].EPSILON
 
-    # ------------------------------------------------------------------
-    # Attribute forwarding so Trainer can access anything it needs
-    # ------------------------------------------------------------------
+    @EPSILON.setter
+    def EPSILON(self, value):
+        for c in self.critics:
+            c.EPSILON = value
 
     @property
     def GAMMA(self):
         return self.critics[0].GAMMA
 
-    @property
-    def EPS(self):
-        return self.critics[0].EPS
-
-    @EPS.setter
-    def EPS(self, value):
-        # Keep all critics in sync on epsilon (exploration is shared)
+    @GAMMA.setter
+    def GAMMA(self, value):
         for c in self.critics:
-            c.EPS = value
+            c.GAMMA = value
+
+    def update(self, addBias: bool = False) -> float:
+        """
+        Update all critics on the same batch drawn from shared memory.
+        Each critic uses its own target network for Bellman targets, so
+        they diverge over time from their different random initialisations.
+        Returns mean loss (compatible with Trainer's trainingRecords).
+        """
+        batch_size = self.critics[0].BATCH_SIZE
+        if len(self.memory) < batch_size * 20:
+            return
+        transitions = self.memory.sample(batch_size)
+        batch = Transition(*zip(*transitions))
+        (_, _, state, _, _, _,_) = self.unpack_batch(batch)
+        epistem_uncertainty = self.get_uncertainty(state)["epistemic_uncertainty"].max().item()
+
+
+        futures = {
+            self._executor.submit(c.update, addBias, epistem_uncertainty, batch): c
+            for c in self.critics
+        }
+        losses = []
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result is not None:
+                losses.append(result)
+        return (float(np.mean(losses)) if losses else 0.0), epistem_uncertainty
+
+
+    def updateHyperParam(self):
+        """Fan out hyper-parameter schedule (lr, eps, gamma) to all critics."""
+        for c in self.critics:
+            c.updateHyperParam()
+
+    def save(self, cntUpdate: int, folder: str) -> None:
+        """
+        Save all critics. Trainer calls protagonist.save(cntUpdate, pro_modelFolder).
+        Each critic saves to <folder>/critic_<i>/ so files never collide.
+        """
+        for i, c in enumerate(self.critics):
+            sub = os.path.join(folder, f"critic_{i}")
+            os.makedirs(sub, exist_ok=True)
+            c.save(cntUpdate, sub)
+
+    def restore(self, cntUpdate: int, outFolder: str, prefix: str = "pro_model") -> None:
+        """
+        Restore all critics. Called from sim script as:
+            protagonist.restore(idx * checkPeriod, outFolder, prefix="pro_model")
+        Each critic gets a unique per-critic prefix to avoid filename collisions.
+        """
+        for i, c in enumerate(self.critics):
+            c.restore(cntUpdate, outFolder, prefix=f"{prefix}/critic_{i}")
+
+    def initQ(self, env, warmupIter: int, outFolder: str, **kwargs):
+        """
+        Supervised Q warmup for every critic. Each writes to its own subfolder.
+        Returns the last critic's loss array so the warmup-loss plot in the
+        sim script continues to work without modification.
+        """
+        all_losses = []
+        for i, c in enumerate(self.critics):
+            sub = os.path.join(outFolder, f"critic_{i:02d}")
+            os.makedirs(sub, exist_ok=True)
+            all_losses.append(c.initQ(env, warmupIter, sub, **kwargs))
+        return all_losses[-1]
+
+    # ------------------------------------------------------------------
+    # Generic attribute forwarding
+    # ------------------------------------------------------------------
 
     def __getattr__(self, name: str):
         """
-        Forward any attribute Trainer accesses that isn't explicitly
-        defined here to critic 0, keeping backward compatibility with
-        any DDQNSingle API surface we haven't wrapped.
+        Forward any attribute Trainer or the sim script accesses that
+        isn't explicitly defined here (e.g. select_action, optimizer,
+        device_type, etc.) to critics[0].
         """
         if name == 'critics':
             raise AttributeError(name)
         return getattr(self.critics[0], name)
 
     # ------------------------------------------------------------------
-    # Epistemic uncertainty  (new API — call these explicitly)
+    # Epistemic uncertainty API (ensemble-only, call explicitly)
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def get_uncertainty(self, state_tensor: torch.Tensor) -> dict:
         """
-        Per-state epistemic uncertainty from the ensemble.
+        Per-state epistemic uncertainty.
 
         Parameters
         ----------
-        state_tensor : (B, state_dim) tensor
+        state_tensor : (B, state_dim) tensor on self.device
 
         Returns
         -------
-        dict with keys:
-            q_stack               (K, B, A)  raw per-critic Q values
-            mean_q                (B, A)     mean Q
-            var_q                 (B, A)     variance across critics
-            std_q                 (B, A)     std dev
-            min_q                 (B, A)     conservative (min) Q
-            epistemic_uncertainty (B,)       mean(var_q) over action dim
-            safe_disagreement     (B,)       disagreement on Q<0 sign
+        dict:
+            q_stack               (K, B, A)
+            mean_q                (B, A)
+            var_q                 (B, A)   ← primary epistemic uncertainty signal
+            std_q                 (B, A)
+            min_q                 (B, A)   ← conservative (pessimistic) Q
+            epistemic_uncertainty (B,)     mean(var_q) over action dim
+            safe_disagreement     (B,)     critic disagreement on Q<0 (safe) sign
         """
-        q_stack = self.Q_network.stack(state_tensor)  # (K, B, A)
+        q_stack = self.Q_network.stack(state_tensor)   # (K, B, A)
 
         mean_q = q_stack.mean(dim=0)
-        var_q  = q_stack.var(dim=0, unbiased=True)
+        # var_q  = q_stack.var(dim=0, unbiased=True)
         std_q  = q_stack.std(dim=0, unbiased=True)
         min_q  = q_stack.min(dim=0).values
 
-        # Scalar per state: average variance over actions
-        epistemic_uncertainty = var_q.mean(dim=-1)  # (B,)
+        # Biased variance — 1/M * sum(Q^2) - (1/M * sum(Q))^2
+        var_q = q_stack.var(dim=0, unbiased=False)    # (B, A) — per state per action
 
-        # Safe/unsafe disagreement on the min-action decision (RA convention)
+        # Average variance across action dimension → scalar per state
+        epistemic_uncertainty = var_q.mean(dim=-1)     # (B,)
+
+        # Safe/unsafe disagreement on the min-action decision
+        # In RA-RL: min_a Q(s,a) < 0 means the state is believed safe
         min_q_per_critic  = q_stack.min(dim=-1).values     # (K, B)
-        safe_votes        = (min_q_per_critic < 0).float() # (K, B): 1 = critic says safe
+        safe_votes        = (min_q_per_critic < 0).float() # (K, B)
         majority          = (safe_votes.mean(dim=0) >= 0.5).float()  # (B,)
         safe_disagreement = (
             (safe_votes - majority.unsqueeze(0)).abs().mean(dim=0)
@@ -275,9 +321,9 @@ class DDQNEnsemble:
     @torch.no_grad()
     def get_uncertainty_map(self, env, nx: int = 41, ny: int = 41) -> dict:
         """
-        Evaluate uncertainty across the 2-D state grid.
+        Sweep the 2-D state grid and compute uncertainty at every cell.
 
-        Returns a dict of (nx, ny) numpy arrays:
+        Returns dict of (nx, ny) numpy arrays:
             xs, ys, mean_v, var_v, std_v, min_v,
             epistemic_uncertainty, safe_disagreement
         """
@@ -288,9 +334,9 @@ class DDQNEnsemble:
             env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny
         )
 
-        out = {k: np.empty((nx, ny)) for k in
-               ("mean_v", "var_v", "std_v", "min_v",
-                "epistemic_uncertainty", "safe_disagreement")}
+        keys = ("mean_v", "var_v", "std_v", "min_v",
+                "epistemic_uncertainty", "safe_disagreement")
+        out  = {k: np.empty((nx, ny)) for k in keys}
 
         for ix, x in enumerate(xs):
             for iy, y in enumerate(ys):
@@ -313,9 +359,9 @@ class DDQNEnsemble:
         nx: int = 41,
         ny: int = 41,
         vmin: float = -4.0,
-        vmax: float = 4.0,
+        vmax: float =  4.0,
         store: bool = True,
-        show: bool = False,
+        show:  bool = False,
     ) -> None:
         """
         4-panel figure:
@@ -327,7 +373,7 @@ class DDQNEnsemble:
         xs, ys  = maps["xs"], maps["ys"]
 
         panels = [
-            ("mean_v",               "seismic",  vmin,  vmax, r"Mean $\hat{V}$ (protagonist ensemble)"),
+            ("mean_v",               "seismic",  vmin,  vmax, r"Mean $\hat{V}$ (ensemble avg)"),
             ("min_v",                "seismic",  vmin,  vmax, r"Conservative $\hat{V}$ (min critic)"),
             ("epistemic_uncertainty","YlOrRd",   None,  None, r"Epistemic Uncertainty  Var$_k[Q]$"),
             ("safe_disagreement",    "PuRd",     0,     1,    "Safe / Unsafe Disagreement"),
@@ -335,7 +381,7 @@ class DDQNEnsemble:
 
         fig, axes = plt.subplots(1, 4, figsize=(22, 5))
         for ax, (key, cmap, lo, hi, title) in zip(axes, panels):
-            data = maps[key]
+            data  = maps[key]
             im_kw = dict(interpolation='none', extent=axStyle[0],
                          origin='lower', cmap=cmap)
             if lo is not None:

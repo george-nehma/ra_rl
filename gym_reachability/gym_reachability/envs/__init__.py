@@ -21,3 +21,5 @@ from .zermelo_show import ZermeloShowEnv
 # from .new_dubins_car import DubinsCarEnv
 
 from .new_point_mass import PointMass2Env
+
+from .continuous_obs_avoid import ContinuousObsAvoidEnv

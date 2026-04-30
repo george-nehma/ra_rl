@@ -2,30 +2,56 @@
 
 # Environment parameters
 environment:
-  doneType: "TF"
-  costType: "max"
+  envName: "cont-obs-avoid-v0"
+  doneType: "TF" # toThreshold
+  costType: "max_ell_g"
   randomSeed: 0
   reward: -1.0
   penalty: 1.0
   scaling: 4.0
+  timeStep: 0.05
+  maxSteps: 300
+
 
 # Training scheme
 training:
-  warmup: false
+  warmup: true
   warmupIter: 2000
-  maxUpdates: 200000
+  maxUpdates: 3000000
   updateTimes: 10
-  memoryCapacity: 10000
-  checkPeriod: 20000
+  updatePeriodEps: 5.0e+5
+  updatePeriodGamma: 2.5e+5
+  updatePeriodLr: 5.0e+5
+  memoryCapacity: 50000 
+  checkPeriod: 50000
+  batchSize: 2048
+  maxModel: 100
+  tau: 0.01
+  hardUpdate: 1
+  softUpdate: true
+  render: false
+  double: true
+  plotTrainValue: true
+  alpha: 0.185
+  policy: "Gaussian"
+  targetUpdateInterval: 1
+  autoAlphaTuning: true
+
 
 # NN hyper-parameters
 network:
-  annealing: false
-  architecture: [100, 20]
+  annealing: true
+  architecture: [2048, 2048]
   learningRate: 0.001
+  learningRateActor: 0.001
+  learningRateDecay: 0.8
   gamma: 0.9999
+  gammaDecay: 0.1
+  eps: 0.5
+  epsEnd: 0.05
+  epsDecay: 0.7
   actType: "Tanh"
-  numCritic: 3
+  numCritics: 3
 
 # RL type
 rl:
@@ -39,14 +65,16 @@ file:
   outFolder: "experiments"
   plotFigure: false
   storeFigure: true
+  storeBest: false
+  
 
 # Adversary parameters
 adversary:
   # for the function select_action() in DDQNSingle.py
-  selectWorstQ: true
+  selectWorstQ: false
   # for the find_worst_d() function in zermelo_show.py
   findMaxQ: true
   # for the simulate_one_trajectory() function in zermelo_show.py (eval)
-  simMaxQ: false
+  simMaxQ: true
   # for the final test (of each point in the env) in sim_new_point_mass.py
-  testMaxQ: false
+  testMaxQ: true

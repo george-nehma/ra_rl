@@ -4,6 +4,41 @@ Authors: Kai-Chieh Hsu ( kaichieh@princeton.edu )
 """
 import numpy as np
 
+def intersection_with_rectangle(cx, cy, w, h, px, py):
+    # Half sizes
+    hw = w / 2.0
+    hh = h / 2.0
+
+    # Direction vector from center to point
+    dx = px - cx
+    dy = py - cy
+
+    # Avoid division by zero
+    if dx == 0:
+        t_y = (hh if dy > 0 else -hh) / dy
+        return cx, cy + t_y * dy
+
+    if dy == 0:
+        t_x = (hw if dx > 0 else -hw) / dx
+        return cx + t_x * dx, cy
+
+    # Find intersection scale for x boundaries
+    tx1 = ( hw) / dx
+    tx2 = (-hw) / dx
+
+    # Find intersection scale for y boundaries
+    ty1 = ( hh) / dy
+    ty2 = (-hh) / dy
+
+    # Only positive t values (in the direction of the ray)
+    ts = [t for t in [tx1, tx2, ty1, ty2] if t > 0]
+
+    # Take the smallest positive t (first boundary hit)
+    t = min(ts)
+
+    # Intersection point
+    return cx + t*dx, cy + t*dy
+
 
 # == margin ==
 def calculate_margin_rect(s, x_y_w_h, negativeInside=True):
@@ -20,9 +55,16 @@ def calculate_margin_rect(s, x_y_w_h, negativeInside=True):
         float: margin.
     """
   x, y, w, h = x_y_w_h
-  delta_x = np.abs(s[0] - x)
-  delta_y = np.abs(s[1] - y)
-  margin = max(delta_y - h/2, delta_x - w/2)
+
+  x_r, y_r = intersection_with_rectangle(x, y, w, h, s[0], s[1])
+
+  if s[0] >= x - w/2 and s[0] <= x + w/2 and s[1] >= y - h/2 and s[1] <= y + h/2:
+    margin = -np.sqrt((x_r - x)**2 + (y_r - y)**2) - np.sqrt((s[0] - x)**2 + (s[1] - y)**2)
+  else:
+    margin = -np.sqrt((x_r - x)**2 + (y_r - y)**2) + np.sqrt((s[0] - x)**2 + (s[1] - y)**2)
+#   delta_x = np.abs(s[0] - x)
+#   delta_y = np.abs(s[1] - y)
+#   margin = max(delta_y - h/2, delta_x - w/2)
 
   if negativeInside:
     return margin

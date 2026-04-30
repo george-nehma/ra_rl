@@ -1,0 +1,73 @@
+# == CONFIG ==
+
+# Environment parameters
+environment:
+  # envName: "one_player_reach_avoid_lunar_lander" 
+  doneType: "TF" # toThreshold
+  costType: "max_ell_g"
+  randomSeed: 0
+  reward: -1.0
+  penalty: 0.1 #1.0
+  scaling: 4.0
+  timeStep: 0.05
+  maxSteps: 200 #250
+
+
+# Training scheme
+training:
+  warmup: true
+  warmupIter: 2000
+  maxUpdates: 400000
+  updateTimes: 10
+  updatePeriodEps: 5.0e+4
+  updatePeriodGamma: 2.5e+5
+  updatePeriodLr: 5.0e+5
+  memoryCapacity: 1.5e+5 #10000 # 2056*20
+  checkPeriod: 5.0e+4 #20000
+  batchSize: 100 #64 #2056
+  maxModel: 10 #100
+  tau: 0.01
+  hardUpdate: 1
+  softUpdate: true
+  render: false
+  double: true
+
+
+# NN hyper-parameters
+network:
+  annealing: false
+  architecture: [512,512] #[100, 20]
+  learningRate: 1.0e+4 #0.001
+  learningRateDecay: 0.8
+  gamma: 0.9 #0.9999
+  gammaDecay: 0.1
+  eps: 0.5
+  epsEnd: 0.05
+  epsDecay: 0.8 # 0.7
+  actType: "ReLU" #"Tanh"
+  numCritics: 3
+
+# RL type
+rl:
+  mode: "AARA"
+  terminalType: "max"
+
+# File
+file:
+  showTime: true
+  name: ""
+  outFolder: "experiments"
+  plotFigure: false
+  storeFigure: true
+  storeBest: true
+
+# Adversary parameters
+adversary:
+  # for the function select_action() in DDQNSingle.py
+  selectWorstQ: false
+  # for the find_worst_d() function in zermelo_show.py
+  findMaxQ: true
+  # for the simulate_one_trajectory() function in zermelo_show.py (eval)
+  simMaxQ: true
+  # for the final test (of each point in the env) in sim_new_point_mass.py
+  testMaxQ: true

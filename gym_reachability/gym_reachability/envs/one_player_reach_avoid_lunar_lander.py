@@ -26,8 +26,8 @@ from gym_reachability.gym_reachability.envs import (
 class OnePlayerReachAvoidLunarLander(MultiPlayerLunarLanderReachability):
 
   def __init__(
-      self, device=torch.device("cpu"), mode='RA', observation_type='default',
-      param_dict={}, rnd_seed=0, doneType='toEnd', obstacle_sampling=False
+      self, device=torch.device("cpu"), mode='AARA', observation_type='default',
+      param_dict={}, rnd_seed=0, doneType='TF', obstacle_sampling=False
   ):
     """Initializes the environment with given arguments.
 

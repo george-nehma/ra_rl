@@ -26,10 +26,10 @@ import time
 from .model import Model
 from .DDQN import DDQN, Transition
 
-class CriticEnsemble(nn.Module):
-  def __init__(self, n_models, model_fn):
-      super().__init__()
-      self.models = nn.ModuleList([model_fn() for _ in range(n_models)])
+# class CriticEnsemble(nn.Module):
+#   def __init__(self, n_models, model_fn):
+#       super().__init__()
+#       self.models = nn.ModuleList([model_fn() for _ in range(n_models)])
 
 class DDQNSingle(DDQN):
   """
@@ -94,7 +94,7 @@ class DDQNSingle(DDQN):
 
     self.build_optimizer()
 
-  def update(self, addBias=False):
+  def update(self, addBias=False, ep_unc=None, batch=None):
     """Updates the Q-network using a batch of sampled replay transitions.
 
     Args:
@@ -108,11 +108,12 @@ class DDQNSingle(DDQN):
       return
 
     # == EXPERIENCE REPLAY ==
-    transitions = self.memory.sample(self.BATCH_SIZE)
+    if batch is None:
+      transitions = self.memory.sample(self.BATCH_SIZE)
     # Transpose the batch (see https://stackoverflow.com/a/19343/3343043
     # for detailed explanation). This converts batch-array of Transitions
     # to Transition of batch-arrays.
-    batch = Transition(*zip(*transitions))
+      batch = Transition(*zip(*transitions))
     (non_final_mask, non_final_state_nxt, state, action, reward, g_x,
      l_x) = self.unpack_batch(batch)
 
@@ -131,14 +132,9 @@ class DDQNSingle(DDQN):
     # == get a' by Q_network: a' = argmin_a' Q_network(s', a') ==
     with torch.no_grad():
       self.Q_network.eval()
-      if self.dimList[0] == 3:
-        action_nxt = (
-          self.Q_network(non_final_state_nxt).max(1, keepdim=True)[1]
-        )
-      else:
-        action_nxt = (
-          self.Q_network(non_final_state_nxt).min(1, keepdim=True)[1]
-        )
+      action_nxt = (
+        self.Q_network(non_final_state_nxt).min(1, keepdim=True)[1]
+      )
 
     # == get expected value ==
     state_value_nxt = torch.zeros(self.BATCH_SIZE).to(self.device)
@@ -186,17 +182,32 @@ class DDQNSingle(DDQN):
           y[final_mask] = terminal[final_mask]
         else:
           raise ValueError("invalid terminalType")
+        
+
     # == Discounted Adaptive Reach-Avoid Bellman Equation (DARABE) ==
     elif self.mode == "AARA":
       y = torch.zeros(self.BATCH_SIZE).float().to(self.device)
       final_mask = torch.logical_not(non_final_mask)
-      # V(s) = ( 1 - gamma ) * max{ g(s), l(s) } ) + gamma * ( max{ g(s), min{ l(s), V_diff(s') } }
-      #        
-      # where V_diff(s') = V(s') + max{ g(s'), l(s') }
-      terminal = torch.max(l_x, g_x)
-      non_terminal = torch.max(g_x[non_final_mask], torch.min(l_x[non_final_mask], state_value_nxt[non_final_mask]))
-      y[non_final_mask] = (1 - self.GAMMA) * terminal[non_final_mask] + self.GAMMA * non_terminal
-      y[final_mask] = terminal[final_mask]
+
+      # == Epistemic Uncertainty Weight == 
+      _lambda = 1/ep_unc if ep_unc is not None else 1.0
+      # _lambda = 0.0
+      eu_weight = torch.exp(torch.tensor(_lambda) * self.CONFIG.TIME_STEP)
+
+      if addBias:  # Bias version:
+        # V(s) = ( 1 - gamma ) * max{ g(s), l(s) } ) + gamma * ( max{ g(s), min{ l(s), V_diff(s') } }
+        #
+        # where V_diff(s') = V(s') + max{ g(s'), l(s') }
+        terminal = torch.max(l_x, g_x)
+        non_terminal = torch.max(g_x[non_final_mask], torch.min(l_x[non_final_mask], state_value_nxt[non_final_mask] + terminal))
+        y[non_final_mask] = self.GAMMA * non_terminal[non_final_mask]
+        y[final_mask] = terminal[final_mask]
+      else:
+        # V(s) = ( 1 - gamma ) * max{ g(s), l(s) } ) + gamma * ( max{ g(s), min{ l(s), V(s') } }
+        terminal = torch.max(l_x, g_x)
+        non_terminal = torch.max(g_x[non_final_mask], torch.min(l_x[non_final_mask], eu_weight * state_value_nxt[non_final_mask]))
+        y[non_final_mask] = (1 - self.GAMMA) * terminal[non_final_mask] + self.GAMMA * non_terminal
+        y[final_mask] = terminal[final_mask]
 
     # == regression: Q(s, a) <- V(s) ==
     loss = smooth_l1_loss(

@@ -1,26 +1,21 @@
 """
-sim_ensemble.py
----------------
-Train a critic ensemble for reach-avoid RL and evaluate epistemic uncertainty.
+Please contact the author(s) of this library if you have any questions.
+Authors: George Nehma ( gnehma2020@fit.edu )
 
-Mirrors ``sim_naive.py`` exactly in structure; the only additions are:
-  -nc / --numCritics   number of ensemble members (default: 3)
-  -es / --ensembleStrategy  action-selection strategy: mean | conservative | vote
+Ensemble variant of sim_new_point_mass.py. Protagonist is a DDQNEnsemble
+(N critics, seed-diversified) instead of DDQNSingle. Everything else —
+Trainer, adversary, env, config loading — is identical to sim_new_point_mass.py.
 
-Usage examples
---------------
-# Default 3-critic ensemble, RA mode with gamma annealing
-python3 sim_ensemble.py -w -sf -a -g 0.9 -mu 12000000 -cp 600000 -ut 20 -n anneal
+After the standard training / eval block an extra section computes and saves
+the epistemic uncertainty maps (variance of Q across critics, conservative
+min-Q value, and safe/unsafe classification disagreement).
 
-# 5-critic ensemble, conservative action selection
-python3 sim_ensemble.py -sf -g 0.9999 -n 9999 -nc 5 -es conservative
-
-# Quick smoke test
-python3 sim_ensemble.py -w -sf -wi 100 -mu 5000 -cp 2500 -nc 3 -n smoke
+Examples:
+    python3 sim_ensemble.py --config config.yaml
+    python3 sim_ensemble.py --config config_5critics.yaml
 """
 
 import os
-import argparse
 import time
 from warnings import simplefilter
 
@@ -29,437 +24,465 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
+import yaml
+from types import SimpleNamespace
 
-from RARL.DDQNSingle import DDQNSingle
+# CHANGED: DDQNEnsemble as protagonist
 from RARL.DDQNEnsemble import DDQNEnsemble
-from RARL.config import dqnConfig
+from RARL.DDQNSingle import DDQNSingle          # adversary unchanged
+from RARL.Trainer import Trainer
+from RARL.config import ceConfig, dqnConfig
 from RARL.utils import save_obj
-from gym_reachability import gym_reachability  # noqa: F401 – registers envs
+from utils.utils import (
+    plot_protagonist_adversary_actions,
+    plot_RA_eval,
+    PlotConfig,
+)
+from gym_reachability import gym_reachability    # noqa: F401 — registers envs
+
+import argparse
 
 matplotlib.use('Agg')
 simplefilter(action='ignore', category=FutureWarning)
+timestr = time.strftime("%Y-%m-%d-%H_%M_%S")
 
-timestr = time.strftime("%Y-%m-%d-%H_%M")
-
-# =============================================================================
-# CLI
-# =============================================================================
+# == ARGS — YAML config, same as sim_new_point_mass.py ==
 parser = argparse.ArgumentParser()
+parser.add_argument("--config", default="config_PM.yaml", type=str)
+parser.add_argument(
+    "--num_jobs", type=int, default=16,
+    help="Total number of sim_ensemble.py processes running in parallel. "
+         "Used to divide CPU threads evenly across jobs."
+)
+script_args = parser.parse_args()
 
-# -- environment --------------------------------------------------------------
-parser.add_argument(
-    "-dt", "--doneType", help="when to raise done flag", default='toEnd', type=str
-)
-parser.add_argument(
-    "-ct", "--costType", help="cost type", default='sparse', type=str
-)
-parser.add_argument(
-    "-rnd", "--randomSeed", help="random seed", default=0, type=int
-)
-parser.add_argument(
-    "-r", "--reward", help="reward when entering target set", default=-1, type=float
-)
-parser.add_argument(
-    "-p", "--penalty", help="penalty when entering failure set", default=1, type=float
-)
-parser.add_argument(
-    "-s", "--scaling", help="scaling of ell/g", default=4, type=float
-)
+# -- Pin PyTorch threads so parallel jobs don't fight over cores.
+# With N jobs on a C-core machine each job gets C/N threads.
+# e.g. 16 jobs on 64 cores → 4 threads each → all 64 cores busy, no contention.
+_total_cores = os.cpu_count() or 1
+_threads_per_job = max(1, _total_cores // script_args.num_jobs)
+torch.set_num_threads(_threads_per_job)
+torch.set_num_interop_threads(max(1, _threads_per_job // 2))
+print(f"[Thread config] {_total_cores} cores / {script_args.num_jobs} jobs "
+      f"= {_threads_per_job} threads per job")
 
-# -- training -----------------------------------------------------------------
-parser.add_argument("-w",  "--warmup",       help="warmup Q-network",      action="store_true")
-parser.add_argument("-wi", "--warmupIter",   help="warmup iterations",      default=2000,   type=int)
-parser.add_argument("-mu", "--maxUpdates",   help="max gradient updates",   default=400000, type=int)
-parser.add_argument("-ut", "--updateTimes",  help="#hyper-param steps",     default=10,     type=int)
-parser.add_argument("-mc", "--memoryCapacity", help="replay buffer size",   default=10000,  type=int)
-parser.add_argument("-cp", "--checkPeriod",  help="checkpoint period",      default=20000,  type=int)
+with open(script_args.config, "r") as f:
+    config = yaml.safe_load(f)
 
-# -- network ------------------------------------------------------------------
-parser.add_argument("-a",   "--annealing",    help="gamma annealing",        action="store_true")
-parser.add_argument("-arc", "--architecture", help="hidden layer sizes",     default=[100, 20], nargs="*", type=int)
-parser.add_argument("-lr",  "--learningRate", help="learning rate",          default=1e-3,  type=float)
-parser.add_argument("-g",   "--gamma",        help="discount / contraction", default=0.9999, type=float)
-parser.add_argument("-act", "--actType",      help="activation function",    default='Tanh', type=str)
-
-# -- RL mode ------------------------------------------------------------------
-parser.add_argument("-m",  "--mode",         help="RA or lagrange",         default='AARA',  type=str)
-parser.add_argument("-tt", "--terminalType", help="terminal value type",    default='g',   type=str)
-
-# -- ensemble -----------------------------------------------------------------
-parser.add_argument(
-    "-nc", "--numCritics",
-    help="number of ensemble critics (default: 3)",
-    default=3, type=int,
-)
-parser.add_argument(
-    "-es", "--ensembleStrategy",
-    help="action selection: mean | conservative | vote",
-    default='mean', type=str,
-    choices=['mean', 'conservative', 'vote'],
-)
-
-# -- file / output ------------------------------------------------------------
-parser.add_argument("-st", "--showTime",    help="append timestamp to name", action="store_true")
-parser.add_argument("-n",  "--name",        help="extra name tag",           default='',        type=str)
-parser.add_argument("-of", "--outFolder",   help="output folder",            default='experiments', type=str)
-parser.add_argument("-pf", "--plotFigure",  help="show figures interactively", action="store_true")
-parser.add_argument("-sf", "--storeFigure", help="save figures to disk",      action="store_true")
-
-args = parser.parse_args()
+args = SimpleNamespace(**{k: v for section in config.values() for k, v in section.items()})
 print(args)
 
-# =============================================================================
-# Config
-# =============================================================================
-env_name   = "zermelo_show-v0"
-device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-maxUpdates = args.maxUpdates
-updateTimes = args.updateTimes
-updatePeriod = int(maxUpdates / updateTimes)
-maxSteps   = 250
+# == CONFIGURATION ==
+env_name     = args.envName
+device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-fn = args.name + ('-' + args.doneType) + ('-' + args.costType if args.mode == 'lagrange' else '')
+if env_name =="zermelo_show-v0":
+    env_title = "point-mass" 
+elif env_name == "one_player_reach_avoid_lunar_lander":
+    env_title = "lunar-lander"
+
+updatePeriod = int(args.maxUpdates / args.updateTimes)
+                           
+storeFigure  = args.storeFigure
+plotFigure   = args.plotFigure
+
+fn = args.name + args.doneType
 if args.showTime:
-    fn += '-' + timestr
+    fn = fn + '-' + timestr
 
-outFolder = os.path.join(
-    args.outFolder, 'ensemble', f"{args.numCritics}critics", 'DDQN', args.mode, fn
-)
+outFolder    = os.path.join(args.outFolder, 'ensemble', str(args.numCritics)+ "critics", env_title, 'SAC', args.mode, fn)
 figureFolder = os.path.join(outFolder, 'figure')
 os.makedirs(figureFolder, exist_ok=True)
-print("Output folder:", outFolder)
+print(outFolder)
 
-# -- gamma / epsilon schedule mirrors sim_naive.py exactly -------------------
-if args.mode == 'lagrange':
-    envMode   = 'normal'
-    agentMode = 'normal'
-    GAMMA_END = args.gamma
-    EPS_PERIOD = updatePeriod
-    EPS_RESET_PERIOD = maxUpdates
+# == Epsilon / gamma schedule — identical to sim_new_point_mass.py ==
+if args.mode == 'RA':
+    agentMode = 'RA'
+    if args.annealing:
+        GAMMA_END        = 0.999999
+        EPS_PERIOD       = int(args.updatePeriodEps / 10)
+        EPS_RESET_PERIOD = args.updatePeriodEps
+    else:
+        GAMMA_END        = 0.999
+        EPS_PERIOD       = args.updatePeriodEps
+        EPS_RESET_PERIOD = args.maxUpdates
+
 elif args.mode == 'AARA':
-    envMode   = 'AARA'
     agentMode = 'AARA'
     if args.annealing:
         GAMMA_END        = 0.999999
-        EPS_PERIOD       = int(updatePeriod / 10)
-        EPS_RESET_PERIOD = updatePeriod
+        EPS_PERIOD       = int(args.updatePeriodEps / 10)
+        EPS_RESET_PERIOD = args.updatePeriodEps
     else:
-        GAMMA_END        = args.gamma
-        EPS_PERIOD       = updatePeriod
-        EPS_RESET_PERIOD = maxUpdates
+        GAMMA_END        = 0.999
+        EPS_PERIOD       = args.updatePeriodEps
+        EPS_RESET_PERIOD = args.maxUpdates
 
-sample_inside_obs = args.doneType == 'toEnd'
+sample_inside_obs = False
 
-# =============================================================================
-# Environment
-# =============================================================================
+# == Environment — passes config=args like updated sim_new_point_mass.py ==
 print("\n== Environment Information ==")
 env = gym.make(
-    env_name, config=args, device=device, mode=envMode, doneType=args.doneType,
-    sample_inside_obs=sample_inside_obs, envType='basic'
+    env_name, config=args, device=device,
+    sample_inside_obs=sample_inside_obs, envType="basic"
 )
-stateDim  = env.unwrapped.state.shape[0]
-actionNum = env.unwrapped.action_space.n
+
+stateDim    = env.unwrapped.state.shape[0]
+actionNum   = env.unwrapped.action_space.n
 action_list = np.arange(actionNum)
-print(f"State Dim: {stateDim}, Action Dim: {actionNum}")
-print(env.unwrapped.discrete_controls)
+print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, actionNum))
+print(f"Discrete Controls: {env.unwrapped.discrete_controls}")
 
 env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling)
 env.unwrapped.set_seed(args.randomSeed)
 
-vmin = -1 * args.scaling
-vmax =  1 * args.scaling
-
-# -- optional: plot environment margins (same as sim_naive.py) ----------------
-if args.plotFigure or args.storeFigure:
-    nx_env, ny_env = 101, 101
-    v_env = np.zeros((nx_env, ny_env))
-    l_x   = np.zeros((nx_env, ny_env))
-    g_x   = np.zeros((nx_env, ny_env))
-    xs_env = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx_env)
-    ys_env = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny_env)
-    it = np.nditer(v_env, flags=['multi_index'])
+# == Environment margin plots (unchanged from sim_new_point_mass.py) ==
+if plotFigure or storeFigure:
+    nx, ny = 101, 101
+    vmin = -1 * args.scaling
+    vmax =  1 * args.scaling
+    v    = np.zeros((nx, ny))
+    l_x  = np.zeros((nx, ny))
+    g_x  = np.zeros((nx, ny))
+    xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
+    ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
+    it = np.nditer(v, flags=['multi_index'])
     while not it.finished:
         idx = it.multi_index
-        x, y = xs_env[idx[0]], ys_env[idx[1]]
-        l_x[idx] = env.unwrapped.target_margin(np.array([x, y]))
-        g_x[idx] = env.unwrapped.safety_margin(np.array([x, y]))
-        v_env[idx] = np.maximum(l_x[idx], g_x[idx])
+        x, y       = xs[idx[0]], ys[idx[1]]
+        l_x[idx]   = env.unwrapped.target_margin(np.array([x, y]))
+        g_x[idx]   = env.unwrapped.safety_margin(np.array([x, y]))
+        v[idx]     = np.maximum(l_x[idx], g_x[idx])
         it.iternext()
+
     axStyle = env.unwrapped.get_axes()
     fig, axes = plt.subplots(1, 3, figsize=(12, 6))
     for ax, data, title in zip(
-        axes, [l_x, g_x, v_env],
-        [r'$\ell(x)$', r'$g(x)$', r'$v(x)$']
+        axes, [l_x, g_x, v],
+        [r'$\ell(x)$', r'$g(x)$', r'$v(x)$'],
     ):
         im = ax.imshow(
-            data.T, interpolation='none', extent=axStyle[0], origin='lower',
-            cmap='seismic', vmin=vmin, vmax=vmax,
+            data.T, interpolation='none', extent=axStyle[0], origin="lower",
+            cmap="seismic", vmin=vmin, vmax=vmax,
         )
-        fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95,
-                     ticks=[vmin, 0, vmax])
+        cbar = fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95,
+                            ticks=[vmin, 0, vmax])
+        cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=24)
         ax.set_title(title, fontsize=18)
         env.unwrapped.plot_target_failure_set(ax=ax)
         env.unwrapped.plot_formatting(ax=ax)
-    if hasattr(env, 'plot_reach_avoid_set'):
-        env.unwrapped.plot_reach_avoid_set(axes[2])
+    env.unwrapped.plot_reach_avoid_set(axes[2])
     fig.tight_layout()
-    if args.storeFigure:
+    if storeFigure:
         fig.savefig(os.path.join(figureFolder, 'env.png'))
-    if args.plotFigure:
-        plt.show(); plt.pause(0.001)
+    if plotFigure:
+        plt.show()
+        plt.pause(0.001)
     plt.close()
 
-# =============================================================================
-# Agent config (shared base; ensemble copies & bumps SEED per critic)
-# =============================================================================
-print("\n== Agent / Ensemble Configuration ==")
-CONFIG = dqnConfig(
-    DEVICE=device, ENV_NAME=env_name, SEED=args.randomSeed,
-    MAX_UPDATES=maxUpdates, MAX_EP_STEPS=maxSteps, BATCH_SIZE=64,
-    MEMORY_CAPACITY=args.memoryCapacity,
+# == Agent CONFIG ==
+print("\n== Agent Information ==")
+
+# CHANGED: protagonist uses ceConfig (superset of dqnConfig with NUM_CRITICS)
+# New fields SELECT_WORST_Q, FIND_MAX_Q, SIM_MAX_Q match updated dqnConfig
+PRO_CONFIG = ceConfig(
+    DEVICE=device, 
+    ENV_NAME=env_name, 
+    SEED=args.randomSeed,
+    MAX_UPDATES=args.maxUpdates, 
+    MAX_EP_STEPS=args.maxSteps,
+    BATCH_SIZE=args.batchSize,
+    MEMORY_CAPACITY=args.memoryCapacity, 
     ARCHITECTURE=args.architecture,
-    ACTIVATION=args.actType,
-    GAMMA=args.gamma, GAMMA_PERIOD=updatePeriod,
-    GAMMA_END=GAMMA_END, EPS_PERIOD=EPS_PERIOD, EPS_DECAY=0.7,
-    EPS_RESET_PERIOD=EPS_RESET_PERIOD,
-    LR_C=args.learningRate, LR_C_PERIOD=updatePeriod, LR_C_DECAY=0.8,
-    MAX_MODEL=100,
+    ACTIVATION=args.actType, 
+    # =================== LEARNING RATE .
+    GAMMA=args.gamma, 
+    GAMMA_PERIOD=args.updatePeriodGamma,
+    GAMMA_END=GAMMA_END, 
+    GAMMA_DECAY=args.gammaDecay,
+    # =================== EXPLORATION PARAMS.
+    EPSILON=args.eps,
+    EPS_END=args.epsEnd,
+    EPS_PERIOD=EPS_PERIOD, 
+    EPS_DECAY=args.epsDecay,
+    EPS_RESET_PERIOD=EPS_RESET_PERIOD, 
+    # =================== LEARNING RATE PARAMS.
+    LR_C=args.learningRate,
+    LR_C_END=args.learningRate * 0.5,
+    LR_C_PERIOD=args.updatePeriodLr, 
+    LR_C_DECAY=args.learningRateDecay, 
+    # ===================
+    MAX_MODEL=args.maxModel,
+    NUM_CRITICS=args.numCritics,
+    SELECT_WORST_Q=args.selectWorstQ,
+    FIND_MAX_Q=args.findMaxQ,
+    SIM_MAX_Q=args.simMaxQ, 
+    TIME_STEP=args.timeStep,
+    TAU=args.tau,
+    HARD_UPDATE=args.hardUpdate,
+    SOFT_UPDATE=args.softUpdate,
+    RENDER=args.render,
+    DOUBLE=args.double,
+    REWARD=args.reward,
+    PENALTY=args.penalty,
 )
 
-dimList = [stateDim] + CONFIG.ARCHITECTURE + [actionNum]
 
-print(f"\nBuilding ensemble with {args.numCritics} critics ...")
-ensemble = DDQNEnsemble(
-    CONFIG, actionNum, action_list,
-    dim_list=dimList,
-    num_critics=args.numCritics,
-    mode=agentMode,
-    terminal_type=args.terminalType,
+# == TRAINER ==
+trainer = Trainer(PRO_CONFIG)
+
+# == PROTAGONIST — DDQNEnsemble ==========================================
+# CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
+dimList     = [stateDim] + PRO_CONFIG.ARCHITECTURE + [actionNum]
+protagonist = DDQNEnsemble(
+    PRO_CONFIG, actionNum, trainer.memory,
+    dimList=dimList, mode=agentMode, terminalType=args.terminalType,
 )
-print(f"\n{ensemble}")
+print(protagonist)
+print("We want to use: {}, and Agent uses: {}".format(device, protagonist.device))
+print("Critic is using cuda: ", next(protagonist.Q_network.parameters()).is_cuda)
 
-# =============================================================================
-# Warmup (optional)
-# =============================================================================
-if args.warmup:
-    print("\n== Warming up ensemble critics ==")
-    all_warmup_losses = ensemble.init_q(
-        env, args.warmupIter, outFolder,
-        num_warmup_samples=200,
-        vmin=vmin, vmax=vmax,
-        plot_figure=args.plotFigure,
-        store_figure=args.storeFigure,
-    )
+# if args.warmup:
+#     print("\n== Warmup Q (protagonist ensemble) ==")
+#     lossList = protagonist.initQ(
+#         env, args.warmupIter, outFolder,
+#         num_warmup_samples=200, vmin=vmin, vmax=vmax,
+#         plotFigure=plotFigure, storeFigure=storeFigure,
+#     )
 
-    if args.plotFigure or args.storeFigure:
-        fig, axes = plt.subplots(1, args.numCritics,
-                                 figsize=(5 * args.numCritics, 4))
-        if args.numCritics == 1:
-            axes = [axes]
-        for i, (ax, losses) in enumerate(zip(axes, all_warmup_losses)):
-            tmp = np.arange(500, args.warmupIter)
-            ax.plot(tmp, losses[tmp], 'b-')
-            ax.set_xlabel('Iteration', fontsize=14)
-            ax.set_ylabel('Loss', fontsize=14)
-            ax.set_title(f'Critic {i} Warmup Loss', fontsize=14)
-        fig.tight_layout()
-        if args.storeFigure:
-            fig.savefig(os.path.join(figureFolder, 'warmup_loss.png'))
-        if args.plotFigure:
-            plt.show(); plt.pause(0.001)
-        plt.close()
+# == ADVERSARY — DDQNSingle, unchanged ===================================
+# dimList_adv = [stateDim + 1] + ADV_CONFIG.ARCHITECTURE + [actionNum]
+# adversary   = DDQNSingle(
+#     ADV_CONFIG, actionNum, trainer.memory,
+#     dimList=dimList_adv, mode=agentMode, terminalType=args.terminalType,
+# )
+# print("We want to use: {}, and Agent uses: {}".format(device, adversary.device))
+# print("Critic is using cuda: ", next(adversary.Q_network.parameters()).is_cuda)
 
-# =============================================================================
-# Training
-# =============================================================================
-print("\n== Training Ensemble ==")
-all_records, all_progress = ensemble.learn(
-    env,
-    max_updates=maxUpdates,
-    max_ep_steps=maxSteps,
-    warmup_q=False,
-    done_terminate=True,
-    vmin=vmin, vmax=vmax,
-    num_rnd_traj=10000,
-    check_period=args.checkPeriod,
-    out_folder=outFolder,
-    plot_figure=args.plotFigure,
-    store_figure=args.storeFigure,
+# if args.warmup:
+#     print("\n== Warmup Q (adversary) ==")
+#     lossList = adversary.initQ(
+#         env, args.warmupIter, outFolder,
+#         num_warmup_samples=200, vmin=vmin, vmax=vmax,
+#         plotFigure=plotFigure, storeFigure=storeFigure,
+#     )
+    # if plotFigure or storeFigure:
+    #     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+    #     tmp = np.arange(500, args.warmupIter)
+    #     ax.plot(tmp, lossList[tmp], 'b-')
+    #     ax.set_xlabel('Iteration', fontsize=18)
+    #     ax.set_ylabel('Loss', fontsize=18)
+    #     plt.tight_layout()
+    #     if storeFigure:
+    #         fig.savefig(os.path.join(figureFolder, 'initQ_Loss.png'))
+    #     if plotFigure:
+    #         plt.show()
+    #         plt.pause(0.001)
+    #     plt.close()
+
+# == TRAINING — Trainer.learn unchanged ==================================
+print("\n== Training Information ==")
+vmin        = -1 * args.scaling
+vmax        =  1 * args.scaling
+checkPeriod = args.checkPeriod
+
+trainRecords, trainProgress = trainer.learn(
+    protagonist,
+    env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
+    doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
+    checkPeriod=checkPeriod, outFolder=outFolder, storeBest=args.storeBest,
+    plotFigure=args.plotFigure, storeFigure=args.storeFigure, 
+    plotTrainValue=args.plotTrainValue, verbose=True
 )
 
-# =============================================================================
-# Restore best checkpoint per critic
-# =============================================================================
-print("\n== Restoring best checkpoints ==")
-best_rates = ensemble.restore_best(all_progress, args.checkPeriod, outFolder)
-print(f"  Mean success rate across ensemble: {np.mean(best_rates):.3f} "
-      f"± {np.std(best_rates):.3f}")
+trainDict = {
+    'trainRecords':  trainRecords,
+    'trainProgress': trainProgress,
+}
+filePath = os.path.join(outFolder, 'train')
 
-# =============================================================================
-# Training diagnostics – per-critic loss & success rate curves
-# =============================================================================
-if args.plotFigure or args.storeFigure:
-    fig, axes = plt.subplots(2, args.numCritics,
-                             figsize=(6 * args.numCritics, 8))
-    if args.numCritics == 1:
-        axes = axes.reshape(2, 1)
+# == POST-TRAINING: loss / success curves + rollout eval =================
+# Mirrors sim_new_point_mass.py: everything below is inside plotFigure or
+# storeFigure guard, plus ensemble-specific uncertainty maps appended after.
+if plotFigure or storeFigure:
 
-    for i, (records, progress) in enumerate(zip(all_records, all_progress)):
-        # loss
-        ax = axes[0, i]
-        ax.plot(records, 'b:', alpha=0.8)
-        ax.set_title(f'Critic {i} — Training Loss', fontsize=12)
-        ax.set_xlabel('Update', fontsize=11)
-        ax.set_ylabel('Loss', fontsize=11)
-        ax.set_xlim(left=0, right=maxUpdates)
+    # -- training curves ---------------------------------------------------
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    ax = axes[0]
+    ax.plot(trainRecords[:,0], 'b:')
+    ax.set_xlabel('Iteration (x 1e5)', fontsize=18)
+    ax.set_xticks(np.linspace(0, args.maxUpdates, 5))
+    ax.set_xticklabels(np.linspace(0, args.maxUpdates, 5) / 1e5)
+    ax.set_title('loss_critic', fontsize=18)
+    ax.set_xlim(left=0, right=args.maxUpdates)
 
-        # success rate
-        ax = axes[1, i]
-        x = np.arange(progress.shape[0]) + 1
-        ax.plot(x, progress[:, 0], 'b-o', markersize=5)
-        ax.axhline(best_rates[i], color='r', linestyle='--', alpha=0.7,
-                   label=f'best={best_rates[i]:.3f}')
-        ax.set_title(f'Critic {i} — Success Rate', fontsize=12)
-        ax.set_xlabel('Checkpoint', fontsize=11)
-        ax.set_ylabel('Success Rate', fontsize=11)
-        ax.legend(fontsize=10)
+    ax = axes[1]
+    ax.plot(trainRecords[:,1], 'r')
+    ax.set_xlabel('Iteration (x 1e5)', fontsize=18)
+    ax.set_xticks(np.linspace(0, args.maxUpdates, 5))
+    ax.set_xticklabels(np.linspace(0, args.maxUpdates, 5) / 1e5)
+    ax.set_title('Epistemic Uncertainty', fontsize=18)
+    ax.set_xlim(left=0, right=args.maxUpdates)
 
+    data = trainProgress[:, 0]
+    ax   = axes[2]
+    x    = np.arange(data.shape[0]) + 1
+    ax.plot(x, data, 'b-o')
+    ax.set_xlabel('Index', fontsize=18)
+    ax.set_xticks(x)
+    ax.set_title('Success Rate', fontsize=18)
+    ax.set_xlim(left=1, right=data.shape[0])
     fig.tight_layout()
-    if args.storeFigure:
-        fig.savefig(os.path.join(figureFolder, 'ensemble_training.png'))
-    if args.plotFigure:
-        plt.show(); plt.pause(0.001)
+    if storeFigure:
+        fig.savefig(os.path.join(figureFolder, 'train_loss_value_success.png'))
+    if plotFigure:
+        plt.show()
+        plt.pause(0.001)
     plt.close()
 
-# =============================================================================
-# Epistemic uncertainty maps
-# =============================================================================
-print("\n== Computing epistemic uncertainty maps ==")
-ensemble.plot_uncertainty_maps(
-    env,
-    out_folder=figureFolder,
-    nx=41, ny=41,
-    store=args.storeFigure,
-    show=args.plotFigure,
-)
+    # -- restore best checkpoint ------------------------------------------
+    idx         = np.argmax(trainProgress[:, 0]) + 1
+    successRate = np.amax(trainProgress[:, 0])
+    print('We pick model with success rate-{:.3f}'.format(successRate))
+    # CHANGED: ensemble restore saves per-critic with unique prefixes
+    protagonist.restore(idx * args.checkPeriod, outFolder, prefix="pro_model")
+    # adversary.restore(  idx * args.checkPeriod, outFolder, prefix="adv_model")
 
-# =============================================================================
-# Grid-level rollout evaluation using ensemble action selection
-# =============================================================================
-print(f"\n== Rollout evaluation (strategy='{args.ensembleStrategy}') ==")
-nx_eval, ny_eval = 41, 41
-xs_eval = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx_eval)
-ys_eval = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny_eval)
+    # -- grid rollout eval (identical to sim_new_point_mass.py) -----------
+    nx = 41
+    ny = 121
+    xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
+    ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
 
-resultMtx   = np.empty((nx_eval, ny_eval), dtype=int)
-actDistMtx  = np.empty((nx_eval, ny_eval), dtype=int)
-varMtx      = np.empty((nx_eval, ny_eval))
-disAgreeMtx = np.empty((nx_eval, ny_eval))
+    resultMtx      = np.empty((nx, ny), dtype=int)
+    actDistMtx     = np.empty((nx, ny), dtype=int)
+    disturbDistMtx = np.empty((nx, ny), dtype=int)
+    # ADDED: uncertainty matrices
+    varMtx         = np.empty((nx, ny))
+    disAgreeMtx    = np.empty((nx, ny))
 
-it = np.nditer(resultMtx, flags=['multi_index'])
-while not it.finished:
-    idx = it.multi_index
-    x, y = xs_eval[idx[0]], ys_eval[idx[1]]
-    state = np.array([x, y], dtype=np.float32)
-    st = torch.FloatTensor(state).unsqueeze(0).to(ensemble.device)
+    analytic_max_fail = 0
+    analytic_min_fail = 0
 
-    # uncertainty
-    metrics = ensemble.get_uncertainty(st)
-    varMtx[idx]      = metrics["epistemic_uncertainty"].item()
-    disAgreeMtx[idx] = metrics["safe_disagreement"].item()
+    it = np.nditer(resultMtx, flags=['multi_index'])
+    while not it.finished:
+        idx_cell = it.multi_index
+        print(idx_cell, end='\r')
+        x, y  = xs[idx_cell[0]], ys[idx_cell[1]]
+        state = np.array([x, y])
 
-    # action via ensemble strategy
-    action_index = ensemble.act(st, strategy=args.ensembleStrategy)
-    actDistMtx[idx] = action_index
+        stateTensor  = torch.FloatTensor(state).to(device).unsqueeze(0)
+        action_index = protagonist.Q_network(stateTensor).min(dim=1)[1].cpu().item()
 
-    # rollout using mean Q network (first critic as proxy – or you can
-    # build a thin wrapper; here we use critic 0 which is consistent with
-    # the existing simulate_one_trajectory API)
-    _, _, result = env.unwrapped.simulate_one_trajectory(
-        ensemble.critics[0].Q_network, T=250, state=state, toEnd=False
+        # disturbance index — mirrors testMaxQ flag in sim_new_point_mass.py
+        if args.testMaxQ:
+            disturb_index = protagonist.Q_network(stateTensor).max(dim=1)[1].cpu().item()
+        else:
+            disturb_index = protagonist.select_action(state, env, agent='adv', explore=False)
+
+        actDistMtx    [idx_cell] = action_index
+        disturbDistMtx[idx_cell] = disturb_index
+
+        # ADDED: epistemic uncertainty at this state
+        unc = protagonist.get_uncertainty(stateTensor)
+        varMtx    [idx_cell] = unc["epistemic_uncertainty"].item()
+        disAgreeMtx[idx_cell] = unc["safe_disagreement"].item()
+
+        _, result, _, _ = env.unwrapped.simulate_one_trajectory(
+            protagonist.Q_network, T=250, state=state
+        )
+
+        g_x_val         = env.unwrapped.safety_margin(state)
+        inside_max_diag = env.unwrapped.is_inside_diagonal_region(state)
+        inside_min_diag = env.unwrapped.is_inside_diagonal_region(state, min=True)
+        if g_x_val > 0:
+            analytic_min_fail += 1
+            analytic_max_fail += 1
+        else:
+            if inside_max_diag: analytic_max_fail += 1
+            if inside_min_diag: analytic_min_fail += 1
+
+        resultMtx[idx_cell] = result
+        it.iternext()
+
+    print('Analytical Success Rate for Maximal Disturbances-{:.3f}'.format(
+        1 - analytic_max_fail / (nx * ny)))
+    print('Analytical Success Rate for No Disturbances-{:.3f}'.format(
+        1 - analytic_min_fail / (nx * ny)))
+    print('Best RA Success Rate with Adversarial Disturbances-{:.3f}'.format(
+        (resultMtx == 1).sum() / (nx * ny)))
+
+    cfg = PlotConfig(
+        nx=nx, ny=ny, xs=xs, ys=ys, vmin=vmin, vmax=vmax,
+        resultMtx=resultMtx, actDistMtx=actDistMtx,
+        disturbDistMtx=disturbDistMtx, figureFolder=figureFolder,
+        plotFigure=plotFigure, storeFigure=storeFigure, actionNum=actionNum,
     )
-    resultMtx[idx] = result
-    it.iternext()
+    plot_RA_eval(env, protagonist, cfg)
+    plot_protagonist_adversary_actions(env, cfg)
+    # plot_protagonist_adversary_values commented out, matching sim_new_point_mass.py
 
-# =============================================================================
-# Rollout visualisation
-# =============================================================================
-if args.plotFigure or args.storeFigure:
+    # -- ADDED: 4-panel epistemic uncertainty figure ----------------------
+    protagonist.plot_uncertainty_maps(
+        env,
+        out_folder=figureFolder,
+        nx=41, ny=ny,
+        vmin=vmin, vmax=vmax,
+        store=storeFigure,
+        show=plotFigure,
+    )
+
+    # -- ADDED: uncertainty overlay on rollout grid -----------------------
     axStyle = env.unwrapped.get_axes()
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5), sharex=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
 
-    # Value (mean Q)
     ax = axes[0]
-    unc_maps = ensemble.get_uncertainty_map(env, nx=nx_eval, ny=ny_eval)
-    im = ax.imshow(
-        unc_maps['mean_v'].T, interpolation='none', extent=axStyle[0],
-        origin='lower', cmap='seismic', vmin=vmin, vmax=vmax, zorder=-1,
-    )
-    ax.contour(xs_eval, ys_eval, unc_maps['mean_v'].T,
-               levels=[0], colors='k', linewidths=2, linestyles='dashed')
-    ax.set_xlabel('Mean Value', fontsize=14)
-
-    # Rollout result
-    ax = axes[1]
-    ax.imshow(
-        (resultMtx != 1).T, interpolation='none', extent=axStyle[0],
-        origin='lower', cmap='seismic', vmin=0, vmax=1, zorder=-1,
-    )
-    env.unwrapped.plot_trajectories(
-        ensemble.critics[0].Q_network, states=env.unwrapped.visual_initial_states,
-        toEnd=True, ax=ax, c='w', lw=1.5,
-    )
-    ax.set_xlabel('Rollout RA', fontsize=14)
-
-    # Epistemic uncertainty
-    ax = axes[2]
     im = ax.imshow(
         varMtx.T, interpolation='none', extent=axStyle[0],
         origin='lower', cmap='YlOrRd', zorder=-1,
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
-    ax.set_xlabel(r'Epistemic Var$_k[Q]$', fontsize=14)
+    ax.set_title(r'Epistemic Uncertainty  Var$_k[Q]$', fontsize=14)
+    env.unwrapped.plot_target_failure_set(ax=ax)
+    env.unwrapped.plot_reach_avoid_set(ax=ax)
+    env.unwrapped.plot_formatting(ax=ax)
 
-    # Critic disagreement on safe/unsafe
-    ax = axes[3]
+    ax = axes[1]
     im = ax.imshow(
         disAgreeMtx.T, interpolation='none', extent=axStyle[0],
         origin='lower', cmap='PuRd', vmin=0, vmax=1, zorder=-1,
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
-    ax.set_xlabel('Safe/Unsafe Disagreement', fontsize=14)
-
-    for ax in axes:
-        env.plot_target_failure_set(ax=ax)
-        if hasattr(env, 'plot_reach_avoid_set'):
-            env.plot_reach_avoid_set(ax)
-        env.plot_formatting(ax=ax)
+    ax.set_title('Safe / Unsafe Disagreement', fontsize=14)
+    env.unwrapped.plot_target_failure_set(ax=ax)
+    env.unwrapped.plot_reach_avoid_set(ax=ax)
+    env.unwrapped.plot_formatting(ax=ax)
 
     fig.suptitle(
-        f"Ensemble ({args.numCritics} critics) | strategy='{args.ensembleStrategy}'",
-        fontsize=14,
+        f"Protagonist Ensemble ({args.numCritics} critics | mode={args.mode})",
+        fontsize=13,
     )
     fig.tight_layout()
-    if args.storeFigure:
-        fig.savefig(os.path.join(figureFolder, 'value_rollout_uncertainty.png'), dpi=150)
-    if args.plotFigure:
-        plt.show(); plt.pause(0.001)
+    if storeFigure:
+        fig.savefig(os.path.join(figureFolder, 'uncertainty_overlay.png'), dpi=150)
+    if plotFigure:
+        plt.show()
+        plt.pause(0.001)
     plt.close()
 
-# =============================================================================
-# Save all results
-# =============================================================================
-trainDict = {
-    'numCritics':       args.numCritics,
-    'ensembleStrategy': args.ensembleStrategy,
-    'bestRates':        best_rates,
-    'allRecords':       all_records,
-    'allProgress':      all_progress,
-    'resultMtx':        resultMtx,
-    'actDistMtx':       actDistMtx,
-    'varMtx':           varMtx,
-    'disAgreeMtx':      disAgreeMtx,
-}
-save_obj(trainDict, os.path.join(outFolder, 'ensemble_train'))
-print("\nDone. Results saved to:", outFolder)
+    # -- save rollout matrices --------------------------------------------
+    trainDict['resultMtx']      = resultMtx
+    trainDict['actDistMtx']     = actDistMtx
+    trainDict['disturbDistMtx'] = disturbDistMtx
+    trainDict['varMtx']         = varMtx         # ADDED
+    trainDict['disAgreeMtx']    = disAgreeMtx    # ADDED
+    trainDict['numCritics']     = args.numCritics # ADDED
+
+# Save uncertainty metrics pickle alongside the main train dict
+protagonist.save_metrics(
+    {'varMtx': varMtx if (plotFigure or storeFigure) else None,
+     'disAgreeMtx': disAgreeMtx if (plotFigure or storeFigure) else None},
+    out_folder=outFolder, tag='_final',
+)
+
+save_obj(trainDict, filePath)

@@ -13,14 +13,15 @@ class config(object):
   """
 
   def __init__(
-      self, ENV_NAME="Pendulum-v0", DEVICE="cpu", SEED=0, MAX_UPDATES=2000000,
+      self, ENV_NAME="Pendulum-v0", DEVICE="cuda", SEED=0, MAX_UPDATES=2000000,
       MAX_EP_STEPS=200, EPSILON=0.95, EPS_END=0.05, EPS_PERIOD=1,
       EPS_DECAY=0.5, EPS_RESET_PERIOD=100, LR_C=1e-3, LR_C_END=1e-4,
-      LR_C_PERIOD=1, LR_C_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
-      GAMMA_PERIOD=200, GAMMA_DECAY=0.5, MEMORY_CAPACITY=10000, BATCH_SIZE=32,
+      LR_C_PERIOD=1, LR_C_DECAY=0.5, LR_A=1e-4, LR_A_END=1e-5,
+      LR_A_PERIOD=1, LR_A_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
+      GAMMA_PERIOD=200, GAMMA_DECAY=0.5, MEMORY_CAPACITY=10000, BATCH_SIZE=512,
       RENDER=False, MAX_MODEL=5, ARCHITECTURE=None, ACTIVATION="Tanh",
       SKIP=False, REWARD=-1, PENALTY=1, SELECT_WORST_Q=True, FIND_MAX_Q=False, 
-      SIM_MAX_Q=False
+      SIM_MAX_Q=False, TIME_STEP=0.05
   ):
     """Initializes an object of the config class with the specified attributes.
 
@@ -80,6 +81,11 @@ class config(object):
     self.LR_C_PERIOD = LR_C_PERIOD
     self.LR_C_DECAY = LR_C_DECAY
 
+    self.LR_A = LR_A
+    self.LR_A_END = LR_A_END
+    self.LR_A_PERIOD = LR_A_PERIOD
+    self.LR_A_DECAY = LR_A_DECAY
+
     self.GAMMA = GAMMA
     self.GAMMA_END = GAMMA_END
     self.GAMMA_PERIOD = GAMMA_PERIOD
@@ -106,21 +112,23 @@ class config(object):
     self.FIND_MAX_Q = FIND_MAX_Q
     self.SIM_MAX_Q = SIM_MAX_Q
 
+    self.TIME_STEP = TIME_STEP
+
 
 class dqnConfig(config):
   """Contains hyper-parameters for (double) deep Q-network.
   """
 
   def __init__(
-      self, ENV_NAME="Pendulum-v0", DEVICE="cpu", SEED=0, MAX_UPDATES=2000000,
+      self, ENV_NAME="Pendulum-v0", DEVICE="cuda", SEED=0, MAX_UPDATES=2000000,
       MAX_EP_STEPS=200, EPSILON=0.95, EPS_END=0.05, EPS_PERIOD=1,
       EPS_DECAY=0.5, EPS_RESET_PERIOD=100, LR_C=1e-3, LR_C_END=1e-4,
       LR_C_PERIOD=1, LR_C_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
       GAMMA_PERIOD=200, GAMMA_DECAY=0.5, TAU=0.01, HARD_UPDATE=1,
-      SOFT_UPDATE=True, MEMORY_CAPACITY=10000, BATCH_SIZE=32, RENDER=False,
+      SOFT_UPDATE=True, MEMORY_CAPACITY=10000, BATCH_SIZE=512, RENDER=False,
       MAX_MODEL=10, DOUBLE=True, ARCHITECTURE=None, ACTIVATION="Tanh",
       SKIP=False, REWARD=-1, PENALTY=1, SELECT_WORST_Q=True,
-      FIND_MAX_Q=False, SIM_MAX_Q=False
+      FIND_MAX_Q=False, SIM_MAX_Q=False, TIME_STEP=0.05
   ):
     """
     Initializes a configuration object for (double) deep Q-network with the
@@ -169,6 +177,7 @@ class dqnConfig(config):
         SELECT_WORST_Q=SELECT_WORST_Q,
         FIND_MAX_Q=FIND_MAX_Q,
         SIM_MAX_Q=SIM_MAX_Q,
+        TIME_STEP=TIME_STEP,
     )
     self.DOUBLE = DOUBLE
     self.TAU = TAU
@@ -180,14 +189,17 @@ class ceConfig(config):
   """
 
   def __init__(
-      self, ENV_NAME="Pendulum-v0", DEVICE="cpu", SEED=0, MAX_UPDATES=2000000,
+      self, ENV_NAME="Pendulum-v0", DEVICE="cuda", SEED=0, MAX_UPDATES=2000000,
       MAX_EP_STEPS=200, EPSILON=0.95, EPS_END=0.05, EPS_PERIOD=1,
       EPS_DECAY=0.5, EPS_RESET_PERIOD=100, LR_C=1e-3, LR_C_END=1e-4,
-      LR_C_PERIOD=1, LR_C_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
+      LR_C_PERIOD=1, LR_C_DECAY=0.5, LR_A=1e-4, LR_A_END=1e-5,
+      LR_A_PERIOD=1, LR_A_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
       GAMMA_PERIOD=200, GAMMA_DECAY=0.5, TAU=0.01, HARD_UPDATE=1,
-      SOFT_UPDATE=True, MEMORY_CAPACITY=10000, BATCH_SIZE=32, RENDER=False,
+      SOFT_UPDATE=True, MEMORY_CAPACITY=10000, BATCH_SIZE=512, RENDER=False,
       MAX_MODEL=10, DOUBLE=True, ARCHITECTURE=None, ACTIVATION="Tanh",
-      SKIP=False, REWARD=-1, PENALTY=1, NUM_CRITICS=3
+      SKIP=False, REWARD=-1, PENALTY=1, NUM_CRITICS=3, SELECT_WORST_Q=True,
+      FIND_MAX_Q=False, SIM_MAX_Q=False, TIME_STEP=0.05, ALPHA=0.2, POLICY="Gaussian",
+      TARGET_UPDATE_INTERVAL=1, AUTO_ALPHA_TUNING=True
   ):
     """
     Initializes a configuration object for (double) deep Q-network with the
@@ -220,6 +232,10 @@ class ceConfig(config):
         LR_C_END=LR_C_END,
         LR_C_PERIOD=LR_C_PERIOD,
         LR_C_DECAY=LR_C_DECAY,
+        LR_A=LR_A,
+        LR_A_END=LR_A_END,
+        LR_A_PERIOD=LR_A_PERIOD,
+        LR_A_DECAY=LR_A_DECAY,
         GAMMA=GAMMA,
         GAMMA_END=GAMMA_END,
         GAMMA_PERIOD=GAMMA_PERIOD,
@@ -233,9 +249,18 @@ class ceConfig(config):
         SKIP=SKIP,
         REWARD=REWARD,
         PENALTY=PENALTY,
+        SELECT_WORST_Q=SELECT_WORST_Q,
+        FIND_MAX_Q=FIND_MAX_Q,
+        SIM_MAX_Q=SIM_MAX_Q,
+        TIME_STEP=TIME_STEP,
+        
     )
     self.DOUBLE = DOUBLE
     self.TAU = TAU
     self.HARD_UPDATE = HARD_UPDATE
     self.SOFT_UPDATE = SOFT_UPDATE
     self.NUM_CRITICS = NUM_CRITICS
+    self.ALPHA = ALPHA
+    self.POLICY = POLICY
+    self.TARGET_UPDATE_INTERVAL = TARGET_UPDATE_INTERVAL
+    self.AUTO_ALPHA_TUNING = AUTO_ALPHA_TUNING

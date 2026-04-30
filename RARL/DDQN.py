@@ -208,7 +208,7 @@ class DDQN(abc.ABC):
         logs_path (str): he folder path of the model.
         verbose (bool, optional): print messages if True. Defaults to True.
     """
-    logs_path = os.path.join(logs_path, prefix + "model", "Q-{}.pth".format(step))
+    logs_path = os.path.join(logs_path, prefix, "Q-{}.pth".format(step))
     self.Q_network.load_state_dict(
         torch.load(logs_path, map_location=self.device)
     )
@@ -249,9 +249,16 @@ class DDQN(abc.ABC):
     else:
       state = torch.FloatTensor(np.array(batch.s)).to(self.device)
       action = torch.LongTensor(np.array(batch.a)).to(self.device).view(-1, 1)
-      non_final_state_nxt = torch.FloatTensor([
-        s for s in batch.s_ if s is not None
-      ]).to(self.device)
+      non_final_states = [s for s in batch.s_ if s is not None]
+      if len(non_final_states) > 0:
+          non_final_state_nxt = torch.from_numpy(
+              np.vstack(non_final_states)
+          ).float().to(self.device)
+      else:
+          non_final_state_nxt = None
+      # non_final_state_nxt = torch.FloatTensor([
+      #   s for s in batch.s_ if s is not None
+      # ]).to(self.device)
     reward = torch.FloatTensor(np.array(batch.r)).to(self.device)
 
     g_x = torch.FloatTensor([info["g_x"] for info in batch.info])

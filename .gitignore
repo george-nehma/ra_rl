@@ -1,0 +1,6 @@
+*.png
+*.pt
+*.pth
+*.pkl
+
+logs/
