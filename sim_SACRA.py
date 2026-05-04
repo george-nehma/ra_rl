@@ -325,7 +325,7 @@ trainRecords, trainProgress = trainer.learn(
     doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
     checkPeriod=checkPeriod, outFolder=outFolder, storeBest=args.storeBest,
     plotFigure=args.plotFigure, storeFigure=args.storeFigure, 
-    plotTrainValue=args.plotTrainValue, verbose=True, runningCostThr=-0.99, itr_init=itr_init,
+    plotTrainValue=args.plotTrainValue, verbose=True, runningCostThr=None, itr_init=itr_init,
 )
 
 trainDict = {

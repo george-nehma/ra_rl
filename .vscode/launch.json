@@ -9,7 +9,8 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "args": ["--checkpoint", "experiments/ensemble/3critics/cont-obs-avoid/SAC/AARA/TF-2026-04-24-11_47_27-best_v", "--checkpointVal", "2850000"],
+            // "args": ["--checkpoint", "experiments/ensemble/3critics/cont-obs-avoid/SAC/AARA/TF-2026-04-24-11_47_27-best_v", "--checkpointVal", "2850000"],
+            "args": [],
             "program": "${file}",
             "python": "/home/exx/.conda/envs/safetyrl-env/bin/python",
             "console": "integratedTerminal"

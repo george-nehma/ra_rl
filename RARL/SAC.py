@@ -36,7 +36,6 @@ class SAC(object):
         # existing code referencing either form continues to work)
         # ----------------------------------------------------------------
         self.CONFIG     = config
-        self.gamma      = config.GAMMA
         self.GAMMA      = config.GAMMA          
         self.tau        = config.TAU
         self.alpha_pro  = config.ALPHA
@@ -87,7 +86,7 @@ class SAC(object):
         # ----------------------------------------------------------------
         # Critics
         # ----------------------------------------------------------------
-        q_dimList = dimList #[dimList[0], 64, 64, 1]
+        q_dimList = dimList # [dimList[0], 128, 128, 128, 1]
         self.critic = QNetwork(config, q_dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
         self.critic_optim = optim.AdamW(self.critic.parameters(), lr=config.LR_C, weight_decay=1e-3)
 
@@ -166,8 +165,8 @@ class SAC(object):
             Tuple (qf1_loss, qf2_loss, pro_loss, adv_loss, alpha_tlog)
             or None if the buffer is not yet large enough.
         """
-        if len(memory) < self.BATCH_SIZE * 20:
-            return None
+        # if len(memory) < self.BATCH_SIZE * 20:
+        #     return None
 
         # ---- sample from replay buffer ---------------------------------
         if batch is None:
@@ -199,7 +198,7 @@ class SAC(object):
             next_disturb, next_log_pi_d, _ = self.adversary.sample(non_final_state_nxt)
             qf1_next, qf2_next = self.critic_target(non_final_state_nxt, next_action, next_disturb)
             # protagonist minimises → take the minimum of the two Q-heads
-        min_qf_next_target[non_final_mask] = (torch.min(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
+        min_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
 
         # Epistemic-uncertainty weight (FIX 3 – use self.CONFIG.TIME_STEP)
         _lambda  = 1.0 / ep_unc if ep_unc is not None else 1.0
@@ -220,13 +219,13 @@ class SAC(object):
         )
         next_q_value[final_mask] = terminal[final_mask]
 
-        qf1_loss = F.smooth_l1_loss(qf1, next_q_value.unsqueeze(-1).detach())
-        qf2_loss = F.smooth_l1_loss(qf2, next_q_value.unsqueeze(-1).detach())
+        qf1_loss = 0 * F.l1_loss(qf1, next_q_value.unsqueeze(-1).detach()) + F.mse_loss(qf1, next_q_value.unsqueeze(-1).detach())
+        qf2_loss = 0 * F.l1_loss(qf2, next_q_value.unsqueeze(-1).detach()) + F.mse_loss(qf2, next_q_value.unsqueeze(-1).detach())
         qf_loss  = qf1_loss + qf2_loss
 
         self.critic_optim.zero_grad()
         qf_loss.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+        # nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optim.step()
 
         self.protagonist.train()
@@ -239,10 +238,10 @@ class SAC(object):
         # 2.  Protagonist update  (minimise Q)
         # ----------------------------------------------------------------
         qf1_pi, qf2_pi = self.critic(state, pi_pro, pi_adv.detach())
-        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+        max_qf_pi = torch.max(qf1_pi, qf2_pi)
 
         # Protagonist wants to *minimise* Q  → minimise  Q - α·H
-        pro_loss = (min_qf_pi + self.alpha_pro * log_pi_pro).mean()
+        pro_loss = (max_qf_pi + self.alpha_pro * log_pi_pro).mean()
 
         self.protagonist_optim.zero_grad()
         pro_loss.backward()
@@ -251,10 +250,10 @@ class SAC(object):
         # 3.  Adversary update  (maximise Q)   
         # ----------------------------------------------------------------
         qf1_pi, qf2_pi = self.critic(state, pi_pro.detach(), pi_adv)
-        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+        max_qf_pi = torch.max(qf1_pi, qf2_pi)
         # The adversary feeds its action into the *same* critic but wants
         # to drive Q *up* → maximise  Q + α·H  (entropy regularised) -loss
-        adv_loss = (-min_qf_pi + self.alpha_adv * log_pi_adv).mean()
+        adv_loss = (-max_qf_pi + self.alpha_adv * log_pi_adv).mean()
 
         self.adversary_optim.zero_grad()
         adv_loss.backward()
@@ -324,7 +323,7 @@ class SAC(object):
         pro_ckpt_path = os.path.join(ckpt_path, "pro_model", "model_{}.pt".format(modelIter))
         critic_ckpt_path = os.path.join(ckpt_path, "pro_model", "critic_{}.pt".format(modelIter))
         adv_ckpt_path = os.path.join(ckpt_path, "adv_model", "model_{}.pt".format(modelIter))
-        print("Loading models from {}".format(ckpt_path))
+        print("Loading models from {}".format(critic_ckpt_path))
         if ckpt_path is not None:
             # ckpt = torch.load(ckpt_path, map_location=self.device)
             self.protagonist.load_state_dict(torch.load(pro_ckpt_path, map_location=self.device))

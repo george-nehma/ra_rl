@@ -87,6 +87,7 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.array([3.5, 1.5]),
             np.array([4, 3.8]),
             np.array([6.3, 6.5]),
+            np.array([5.0,10.0])
         ]
 
         print(
@@ -299,8 +300,8 @@ class ContinuousObsAvoidEnv(gym.Env):
         # target_set_safety_margin
         for _, target_set in enumerate(self.target_x_y_w_h):
             l_x = calculate_margin_rect(s, target_set, negativeInside=True)
-            # if l_x < 0:
-            #     l_x = 5 * l_x
+            if l_x < 0:
+                l_x = 1 * l_x
             l_x_list.append(l_x)
 
         target_margin = np.max(np.array(l_x_list))
@@ -408,15 +409,15 @@ class ContinuousObsAvoidEnv(gym.Env):
         # x, y, theta = state
         x, y = state
 
+        l_x = self.target_margin(np.array([x, y]))
+        g_x = self.safety_margin(np.array([x, y]))
+        
         # one step forward
         # x_dot = x_dot + self.time_step * u[0]
         # y_dot = y_dot + self.time_step * u[1]
         # theta = theta + self.time_step * u[1]
         x = x + self.time_step * u[0]
         y = y + self.time_step * u[1]
-
-        l_x = self.target_margin(np.array([x, y]))
-        g_x = self.safety_margin(np.array([x, y]))
 
         # state = np.array([x, y, theta])
         state = np.array([x, y])
@@ -695,8 +696,8 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         # == Plot V ==
         _, _, v = self.get_value(sacAgent, nx, ny, addBias=addBias)
-        # vmax = np.ceil(max(np.max(v), np.max(-v)))
-        # vmin = -vmax
+        vmax = np.ceil(max(np.max(v), np.max(-v)))
+        vmin = -vmax
 
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.3)

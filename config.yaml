@@ -17,7 +17,7 @@ environment:
 training:
   warmup: true
   warmupIter: 2000
-  maxUpdates: 3000000
+  maxUpdates: 2000000
   updateTimes: 10
   updatePeriodEps: 5.0e+5
   updatePeriodGamma: 2.5e+5
@@ -41,7 +41,7 @@ training:
 # NN hyper-parameters
 network:
   annealing: true
-  architecture: [2048, 2048]
+  architecture: [512, 512]
   learningRate: 0.001
   learningRateActor: 0.001
   learningRateDecay: 0.8

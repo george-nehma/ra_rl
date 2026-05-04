@@ -201,6 +201,8 @@ class StepLRMargin(_scheduler):
       return self.initValue
 
     numDecay = int(self.cnt / self.period)
+    #if numDecay > 0:
+    #  print('gamma update')
     tmpValue = self.goalValue - (self.goalValue
                                  - self.initValue) * (self.decay**numDecay)
     if self.endValue is not None and tmpValue >= self.endValue:
@@ -330,6 +332,7 @@ class GaussianPolicy(nn.Module):
         self.config = CONFIG
         self.actType = CONFIG.ACTIVATION
         self.c_sigma = conditioned_sigma
+        print("GaussianPolicy dimList:", dimList)
 
         self.mu_head = build_mlp(dimList, self.actType)
         log_std_dimList = dimList.copy()
