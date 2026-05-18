@@ -86,6 +86,7 @@ class Model(nn.Module):
           raise ValueError(
               "Activation type ({:s}) is not included!".format(actType)
           )
+    
     if verbose:
       print(self.moduleList)
 
@@ -318,7 +319,7 @@ class QNetwork(nn.Module):
 
     def forward(self, state, action, disturbance):
         xu = torch.cat([state, action, disturbance], 1)
-        
+
         x1 = self.q_head1(xu)
         x2 = self.q_head2(xu)
 
@@ -426,30 +427,57 @@ class DeterministicPolicy(nn.Module):
         return super(DeterministicPolicy, self).to(device)
     
 
+class VectorizedLinear(nn.Module):
+    """
+    A linear layer that computes outputs for N critics in parallel.
+    Weight shape: (num_critics, out_features, in_features)
+    Bias shape: (num_critics, out_features)
+    """
+    def __init__(self, in_features, out_features, num_critics):
+        super().__init__()
+        self.num_critics = num_critics
+        self.weight = nn.Parameter(torch.randn(num_critics, out_features, in_features))
+        self.bias = nn.Parameter(torch.randn(num_critics, out_features))
+        self.reset_parameters()
 
-class PPOPolicy(nn.Module):
-    def __init__(self, CONFIG, dimList, numActions, action_space=None):
-        super(PPOPolicy, self).__init__()
-        
-        self.config = CONFIG
-        self.actType = CONFIG.ACTIVATION
+    def reset_parameters(self):
+        for i in range(self.num_critics):
+            nn.init.xavier_uniform_(self.weight[i], gain=1)
+            nn.init.constant_(self.bias[i], 0)
 
-        self.mu_head = build_mlp(dimList, self.actType)
-        self.log_std_head = nn.Parameter(torch.zeros(numActions))
+    def forward(self, x):
+        # x: (batch, in_features) -> (num_critics, batch, in_features)
+        x_expanded = x.unsqueeze(0).expand(self.num_critics, -1, -1)
+        # res: (num_critics, batch, out_features)
+        res = torch.matmul(x_expanded, self.weight.transpose(-1, -2))
+        return res + self.bias.unsqueeze(1)
 
-        self.apply(weights_init_)
+class VectorizedMLP(nn.Module):
+    """
+    A multi-layer perceptron that computes outputs for N critics in parallel.
+    """
+    def __init__(self, dimList, actType="Tanh", num_critics=1, output_activation=nn.Identity):
+        super().__init__()
+        self.num_critics = num_critics
+        self.moduleList = nn.ModuleList()
+        numLayer = len(dimList) - 1
+        for idx in range(numLayer):
+            i_dim = dimList[idx]
+            o_dim = dimList[idx + 1]
+            self.moduleList.append(VectorizedLinear(i_dim, o_dim, num_critics))
+            if idx < numLayer - 1:
+                if actType == "Sin":
+                    self.moduleList.append(Sin())
+                elif actType == "Tanh":
+                    self.moduleList.append(nn.Tanh())
+                elif actType == "ReLU":
+                    self.moduleList.append(nn.ReLU())
+                else:
+                    raise ValueError(f"Activation type {actType} not supported!")
 
-    def forward(self, state):
-        mean = self.mu_head(state)
-        sigma = torch.exp(self.log_std_head)
-        return mean, sigma
+        self.output_act = output_activation()
 
-    def sample(self, state):
-        mean, sigma = self.forward(state)
-        dist = Normal(mean, sigma)
-        action = dist.sample()
-        log_prob = dist.log_prob(action)
-        return action, log_prob, mean
-
-    def to(self, device):
-        return super(PPOPolicy, self).to(device)
+    def forward(self, x):
+        for m in self.moduleList:
+            x = m(x)
+        return self.output_act(x)

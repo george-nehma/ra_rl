@@ -61,12 +61,12 @@ script_args = parser.parse_args()
 # -- Pin PyTorch threads so parallel jobs don't fight over cores.
 # With N jobs on a C-core machine each job gets C/N threads.
 # e.g. 16 jobs on 64 cores → 4 threads each → all 64 cores busy, no contention.
-# _total_cores = os.cpu_count() or 1
-# _threads_per_job = max(1, _total_cores // script_args.num_jobs)
-# torch.set_num_threads(_threads_per_job)
-# torch.set_num_interop_threads(max(1, _threads_per_job // 2))
-# print(f"[Thread config] {_total_cores} cores / {script_args.num_jobs} jobs "
-#       f"= {_threads_per_job} threads per job")
+_total_cores = os.cpu_count() or 1
+_threads_per_job = max(1, _total_cores // script_args.num_jobs)
+torch.set_num_threads(_threads_per_job)
+torch.set_num_interop_threads(max(1, _threads_per_job // 2))
+print(f"[Thread config] {_total_cores} cores / {script_args.num_jobs} jobs "
+      f"= {_threads_per_job} threads per job")
 
 if script_args.checkpoint is not None:
     with open(os.path.join(script_args.checkpoint, "init_configs.yaml"), "r") as f:
@@ -224,13 +224,13 @@ CONFIG = ceConfig(
     EPS_DECAY=args.epsDecay,
     EPS_RESET_PERIOD=EPS_RESET_PERIOD, 
     # =================== LEARNING RATE PARAMS.
-    LR_C=args.learningRate,
-    LR_C_END=args.learningRate * 0.5,
+    LR_C= args.learningRate,
+    LR_C_END= args.learningRate * 0.5,
     LR_C_PERIOD=args.updatePeriodLr, 
     LR_C_DECAY=args.learningRateDecay, 
     # =================== LEARNING RATE PARAMS.
-    LR_A=args.learningRateActor,
-    LR_A_END=args.learningRateActor * 0.5,
+    LR_A= args.learningRateActor,
+    LR_A_END= args.learningRateActor * 0.5,
     LR_A_PERIOD=args.updatePeriodLr, 
     LR_A_DECAY=args.learningRateDecay, 
     # ===================
@@ -280,36 +280,6 @@ else:
 #         num_warmup_samples=200, vmin=vmin, vmax=vmax,
 #         plotFigure=plotFigure, storeFigure=storeFigure,
 #     )
-
-# == ADVERSARY — DDQNSingle, unchanged ===================================
-# dimList_adv = [stateDim + 1] + ADV_CONFIG.ARCHITECTURE + [actionNum]
-# adversary   = DDQNSingle(
-#     ADV_CONFIG, actionNum, trainer.memory,
-#     dimList=dimList_adv, mode=agentMode, terminalType=args.terminalType,
-# )
-# print("We want to use: {}, and Agent uses: {}".format(device, adversary.device))
-# print("Critic is using cuda: ", next(adversary.Q_network.parameters()).is_cuda)
-
-# if args.warmup:
-#     print("\n== Warmup Q (adversary) ==")
-#     lossList = adversary.initQ(
-#         env, args.warmupIter, outFolder,
-#         num_warmup_samples=200, vmin=vmin, vmax=vmax,
-#         plotFigure=plotFigure, storeFigure=storeFigure,
-#     )
-    # if plotFigure or storeFigure:
-    #     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-    #     tmp = np.arange(500, args.warmupIter)
-    #     ax.plot(tmp, lossList[tmp], 'b-')
-    #     ax.set_xlabel('Iteration', fontsize=18)
-    #     ax.set_ylabel('Loss', fontsize=18)
-    #     plt.tight_layout()
-    #     if storeFigure:
-    #         fig.savefig(os.path.join(figureFolder, 'initQ_Loss.png'))
-    #     if plotFigure:
-    #         plt.show()
-    #         plt.pause(0.001)
-    #     plt.close()
 
 # == TRAINER ==
 trainer = SACTrainer(sacAgent, CONFIG)
@@ -403,24 +373,19 @@ if plotFigure or storeFigure:
         idx_cell = it.multi_index
         print(idx_cell, end='\r')
         x, y  = xs[idx_cell[0]], ys[idx_cell[1]]
-        state = np.array([x, y])
+        state = np.concatenate([np.array([x, y, 0, 0]), env.unwrapped.obs_list])
 
         stateTensor  = torch.FloatTensor(state).to(device).unsqueeze(0)
         _, _, action = sacAgent.protagonist.sample(stateTensor)
-
-        # disturbance index — mirrors testMaxQ flag in sim_new_point_mass.py
-        # if args.testMaxQ:
-        #     disturb_index = protagonist.Q_network(stateTensor).max(dim=1)[1].cpu().item()
-        # else:
         _, _, disturbance = sacAgent.adversary.sample(stateTensor)
 
         actDistMtx    [idx_cell] = action.cpu().detach().numpy()
         disturbDistMtx[idx_cell] = disturbance.cpu().detach().numpy()
 
         # ADDED: epistemic uncertainty at this state
-        # unc = protagonist.get_uncertainty(stateTensor)
-        # varMtx    [idx_cell] = unc["epistemic_uncertainty"].item()
-        # disAgreeMtx[idx_cell] = unc["safe_disagreement"].item()
+        unc = sacAgent.get_uncertainty(stateTensor, action, disturbance)
+        varMtx    [idx_cell] = unc["epistemic_uncertainty"].item()
+        disAgreeMtx[idx_cell] = unc["safe_disagreement"].item()
 
         _, result, _, _ = env.unwrapped.simulate_one_trajectory(
             sacAgent, T=250, state=state
@@ -454,55 +419,54 @@ if plotFigure or storeFigure:
     )
     plot_RA_eval(env, sacAgent, cfg)
     # plot_protagonist_adversary_actions(env, cfg)
-    # plot_protagonist_adversary_values commented out, matching sim_new_point_mass.py
 
     # -- ADDED: 4-panel epistemic uncertainty figure ----------------------
-    # sacAgent.protagonist.plot_uncertainty_maps(
-    #     env,
-    #     out_folder=figureFolder,
-    #     nx=41, ny=ny,
-    #     vmin=vmin, vmax=vmax,
-    #     store=storeFigure,
-    #     show=plotFigure,
-    # )
+    sacAgent.plot_uncertainty_maps(
+        env,
+        out_folder=figureFolder,
+        nx=41, ny=ny,
+        vmin=vmin, vmax=vmax,
+        store=storeFigure,
+        show=plotFigure,
+    )
 
     # -- ADDED: uncertainty overlay on rollout grid -----------------------
-    # axStyle = env.unwrapped.get_axes()
-    # fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+    axStyle = env.unwrapped.get_axes()
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
 
-    # ax = axes[0]
-    # im = ax.imshow(
-    #     varMtx.T, interpolation='none', extent=axStyle[0],
-    #     origin='lower', cmap='YlOrRd', zorder=-1,
-    # )
-    # fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
-    # ax.set_title(r'Epistemic Uncertainty  Var$_k[Q]$', fontsize=14)
-    # env.unwrapped.plot_target_failure_set(ax=ax)
-    # # env.unwrapped.plot_reach_avoid_set(ax=ax)
-    # env.unwrapped.plot_formatting(ax=ax)
+    ax = axes[0]
+    im = ax.imshow(
+        varMtx.T, interpolation='none', extent=axStyle[0],
+        origin='lower', cmap='YlOrRd', zorder=-1,
+    )
+    fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
+    ax.set_title(r'Epistemic Uncertainty  Var$_k[Q]$', fontsize=14)
+    env.unwrapped.plot_target_failure_set(ax=ax)
+    # env.unwrapped.plot_reach_avoid_set(ax=ax)
+    env.unwrapped.plot_formatting(ax=ax)
 
-    # ax = axes[1]
-    # im = ax.imshow(
-    #     disAgreeMtx.T, interpolation='none', extent=axStyle[0],
-    #     origin='lower', cmap='PuRd', vmin=0, vmax=1, zorder=-1,
-    # )
-    # fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
-    # ax.set_title('Safe / Unsafe Disagreement', fontsize=14)
-    # env.unwrapped.plot_target_failure_set(ax=ax)
-    # # env.unwrapped.plot_reach_avoid_set(ax=ax)
-    # env.unwrapped.plot_formatting(ax=ax)
+    ax = axes[1]
+    im = ax.imshow(
+        disAgreeMtx.T, interpolation='none', extent=axStyle[0],
+        origin='lower', cmap='PuRd', vmin=0, vmax=1, zorder=-1,
+    )
+    fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
+    ax.set_title('Safe / Unsafe Disagreement', fontsize=14)
+    env.unwrapped.plot_target_failure_set(ax=ax)
+    # env.unwrapped.plot_reach_avoid_set(ax=ax)
+    env.unwrapped.plot_formatting(ax=ax)
 
-    # fig.suptitle(
-    #     f"Protagonist Ensemble ({args.numCritics} critics | mode={args.mode})",
-    #     fontsize=13,
-    # )
-    # fig.tight_layout()
-    # if storeFigure:
-    #     fig.savefig(os.path.join(figureFolder, 'uncertainty_overlay.png'), dpi=150)
-    # if plotFigure:
-    #     plt.show()
-    #     plt.pause(0.001)
-    # plt.close()
+    fig.suptitle(
+        f"Protagonist Ensemble ({args.numCritics} critics | mode={args.mode})",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    if storeFigure:
+        fig.savefig(os.path.join(figureFolder, 'uncertainty_overlay.png'), dpi=150)
+    if plotFigure:
+        plt.show()
+        plt.pause(0.001)
+    plt.close()
 
     # -- save rollout matrices --------------------------------------------
     trainDict['resultMtx']      = resultMtx

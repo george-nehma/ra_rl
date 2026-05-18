@@ -232,7 +232,7 @@ def plot_RA_eval(env, sacAgent, cfg: PlotConfig):
       cmap='seismic', vmin=cfg.vmin, vmax=cfg.vmax, zorder=-1
   )
   CS = ax.contour(
-      cfg.xs, cfg.ys, v.T, levels=[0], colors='k', linewidths=2, linestyles='dashed'
+      cfg.xs, cfg.ys, v.T, levels=[-0.5], colors='k', linewidths=2, linestyles='dashed'
   )
   cbar = fig.colorbar(
                     im, ax=ax, pad=0.01, fraction=0.05, shrink=.95,
@@ -248,7 +248,7 @@ def plot_RA_eval(env, sacAgent, cfg: PlotConfig):
       origin="lower", cmap='seismic', vmin=0, vmax=1, zorder=-1
   )
   env.unwrapped.plot_trajectories(
-      sacAgent, states=env.unwrapped.visual_initial_states, ax=ax,
+      sacAgent, states=[np.concatenate([arr, env.unwrapped.obs_list]) for arr in env.unwrapped.visual_initial_states], ax=ax,
       c='w', lw=1.5
   )
   ax.set_xlabel('Rollout RA', fontsize=24)

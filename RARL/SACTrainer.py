@@ -89,10 +89,10 @@ class SACTrainer:
             s_store  = None if done else s_
             # Pre-compute the next protagonist action (needed for certain
             # RA-backup variants that use a_ just like the DDQN trainer).
-            if done:
-                a_next = None
-            else:
-                a_next, _ = self.agent.select_action(s_, explore=True)
+            # if done:
+                # a_next = None
+            # else:
+            a_next, _ = self.agent.select_action(s_, explore=True)
 
             self.store_transition(s, u, d, r, s_store, a_next, info)
 
@@ -188,8 +188,7 @@ class SACTrainer:
         runningCost      = 0.0
         checkPointSucc   = 0.0
         ep               = 0
-        epistem_uncertainty = 1.0   # initialise; updated each step
-
+        epistemic_uncertainty = 1.0
         # ----------------------------------------------------------------
         # Tensorboard for logging
         # ----------------------------------------------------------------
@@ -217,26 +216,25 @@ class SACTrainer:
 
                 terminal_step = done or (step_num == MAX_EP_STEPS - 1)
                 s_store  = None if terminal_step else s_
-                a_next   = None
-                if not terminal_step:
-                    a_next, _ = self.agent.select_action(s_, explore=True)
+                # a_next   = None
+                # if not terminal_step:
+                a_next, _ = self.agent.select_action(s_, explore=True)
 
                 self.store_transition(s, u, d, r, s_store, a_next, info)
                 s = s_
 
                 # ---- periodic evaluation --------------------------------
                 if cntUpdate != 0 and cntUpdate % checkPeriod == 0:
-                    trainProgress.append([0, 0, 0])
-                    # results = env.unwrapped.simulate_trajectories(
-                    #     self.agent,
-                    #     T=MAX_EP_STEPS,
-                    #     num_rnd_traj=numRndTraj,
-                    # )[1]
+                    results = env.unwrapped.simulate_trajectories(
+                        self.agent,
+                        T=MAX_EP_STEPS,
+                        num_rnd_traj=numRndTraj,
+                    )[1]
 
-                    # success  = np.sum(results ==  1) / results.shape[0]
-                    # failure  = np.sum(results == -1) / results.shape[0]
-                    # unfinish = np.sum(results ==  0) / results.shape[0]
-                    # trainProgress.append([success, failure, unfinish])
+                    success  = np.sum(results ==  1) / results.shape[0]
+                    failure  = np.sum(results == -1) / results.shape[0]
+                    unfinish = np.sum(results ==  0) / results.shape[0]
+                    trainProgress.append([success, failure, unfinish])
 
                     if verbose:
                         pro_lr = self.agent.critic_optim.state_dict(
@@ -245,34 +243,34 @@ class SACTrainer:
                         print(
                             "  - epi_uncertainty={:.4f}, pro_alpha={:.7f},"
                             " pro_lr={:.7e}, gamma={:.7e}.".format(
-                                epistem_uncertainty,
+                                epistemic_uncertainty,
                                 float(self.agent.alpha_pro),
                                 pro_lr,
                                 self.agent.GAMMA,
                             )
                         )
-                        # print("  - success/failure/unfinished:", end=" ")
-                        # with np.printoptions(
-                        #     formatter={"float": "{: .3f}".format}
-                        # ):
-                        #     print(np.array([success, failure, unfinish]))
+                        print("  - success/failure/unfinished:", end=" ")
+                        with np.printoptions(
+                            formatter={"float": "{: .3f}".format}
+                        ):
+                            print(np.array([success, failure, unfinish]))
 
                     if storeModel:
-                        # if storeBest:
-                        #     if success > checkPointSucc:
-                        #         checkPointSucc = success
-                        #         self._save_models(
-                        #             cntUpdate,
-                        #             pro_modelFolder,
-                        #             adv_modelFolder,
-                        #         )
-                        # else:
+                        if storeBest:
+                            if success > checkPointSucc:
+                                checkPointSucc = success
+                                self._save_models(
+                                    cntUpdate+itr_init,
+                                    pro_modelFolder,
+                                    adv_modelFolder,
+                                )
+                        else:
                             self._save_models(
                                 cntUpdate+itr_init, pro_modelFolder, adv_modelFolder
                             )
 
                     if (plotFigure or storeFigure) and plotTrainValue:
-                        self.agent.critic.eval()
+                        self.agent.Q_network.eval()
                         env.unwrapped.visualize(
                             self.agent,
                             vmin=0 if showBool else vmin,
@@ -294,8 +292,7 @@ class SACTrainer:
                 losses = self.agent.update(
                     self.memory,
                     batch_size=self.CONFIG.BATCH_SIZE,
-                    updates=cntUpdate,
-                    ep_unc=epistem_uncertainty,
+                    updates=cntUpdate
                 )
                 self.agent.updateHyperParam()
                 if losses is not None:
@@ -305,10 +302,11 @@ class SACTrainer:
                         pro_loss,
                         adv_loss,
                         alpha_tlogs,
+                        epistemic_uncertainty
                     ) = losses
                     # Use critic loss spread as a proxy for epistemic
                     # uncertainty (larger disagreement → higher uncertainty).
-                    epistem_uncertainty = abs(qf1_loss - qf2_loss) + 1e-8
+                    # epistem_uncertainty = abs(qf1_loss - qf2_loss) + 1e-8
                     trainingRecords.append(
                         [
                             qf1_loss,
@@ -316,6 +314,7 @@ class SACTrainer:
                             pro_loss,
                             adv_loss,
                             float(alpha_tlogs),
+                            float(epistemic_uncertainty)
                         ]
                     )
                 
@@ -325,6 +324,7 @@ class SACTrainer:
                 logger.add_scalar("Loss/critic1", qf1_loss, cntUpdate+itr_init)
                 logger.add_scalar("Loss/critic2", qf2_loss, cntUpdate+itr_init)
                 logger.add_scalar("HyperParam/alpha_pro", float(alpha_tlogs), cntUpdate+itr_init)
+                logger.add_scalar("HyperParam/Epistemic_uncertainty", float(epistemic_uncertainty), cntUpdate+itr_init)
 
                 cntUpdate += 1
 
@@ -376,7 +376,10 @@ class SACTrainer:
         torch.save(self.agent.protagonist.state_dict(), pro_path)
         torch.save(self.agent.adversary.state_dict(),   adv_path)
         if hasattr(self.agent, "critic"):
-            critic_path = os.path.join(
-                pro_folder, "critic_{:d}.pt".format(cntUpdate)
-            )
-            torch.save(self.agent.critic.state_dict(), critic_path)
+            for i, c in enumerate(self.agent.critics):
+                sub = os.path.join(pro_folder, f"critic_{i}")
+                os.makedirs(sub, exist_ok=True)
+                critic_path = os.path.join(
+                    sub, "critic_{:d}.pt".format(cntUpdate)
+                )
+                torch.save(c.state_dict(), critic_path)

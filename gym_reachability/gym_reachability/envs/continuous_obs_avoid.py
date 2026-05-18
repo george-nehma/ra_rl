@@ -35,7 +35,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         
         self.config = config
         self.mode = mode
-        self.bounds = np.array([[0, 6.88], [0, 11.0]]) # x,y
+        self.bounds = np.array([[0, 6.88], [0, 11.0], [-np.pi, np.pi], [-2, 2]]) # x, y, theta, v
         self.low = self.bounds[:, 0]
         self.high = self.bounds[:, 1]
         self.sample_inside_obs = sample_inside_obs
@@ -43,11 +43,19 @@ class ContinuousObsAvoidEnv(gym.Env):
         # Time-step Parameters.
         self.time_step = self.config.timeStep   
 
-        self.state = np.zeros(2) # x, y, theta 
-        self.obs_high = np.array([6.88, 11.0], dtype=np.float32) # x, y, theta
-        self.obs_low = np.array([0.0, 0.0], dtype=np.float32) # x, y, theta
-        self.act_bound = np.array([2.0, 2.0]).T # v, v_w
-        self.d_bound = np.array([0.0, 0.0]).T # d_v, d_w
+        # Define target set parameters 
+        self.target_x_y_w_h = np.array([[1.44, 7.5, 1.5, 1.5]])
+
+        self.add_obs = self.config.addObs
+
+        # Get obstacles
+        self.randomiseObstacles(self.bounds, num_obstacles=5)
+
+        self.state = np.concatenate([np.zeros(4), self.obs_list]) # x, y, theta , v + obstacles
+        self.obs_high = np.concatenate([np.array([6.88, 11.0, np.pi, 2], dtype=np.float32), np.full(self.obs_list.shape[0], np.inf, dtype=np.float32)]) # x, y, theta, v
+        self.obs_low = np.concatenate([np.array([0.0, 0.0, -np.pi, -1], dtype=np.float32), np.full(self.obs_list.shape[0], -np.inf, dtype=np.float32)]) # x, y, theta, 2
+        self.act_bound = np.array([2.0, 2.0]).T # a, a_w
+        self.d_bound = np.array([0.1, 0.1]).T # d_a, d_w
         self.act_dim = self.act_bound.shape[0]
         self.obs_dim = self.obs_high.shape[0]
 
@@ -60,9 +68,6 @@ class ContinuousObsAvoidEnv(gym.Env):
         self.observation_space = gymnasium.spaces.Box(low=self.obs_low, high=self.obs_high, shape=(self.obs_dim,))
         
         self.viewer = None
-
-        # Define target set parameters 
-        self.target_x_y_w_h = np.array([[1.44, 7.5, 1.5, 1.5]])
 
         # Define the bounds of the robot (x, y, w, h)
         self.robot_bounds = np.array([self.state[0], self.state[1], 0.5, 0.7])  # x, y, w, h
@@ -82,13 +87,14 @@ class ContinuousObsAvoidEnv(gym.Env):
         # Visualization Parameters
         self.target_set_boundary = self.get_target_set_boundary()
         self.visual_initial_states = [
-            np.array([0.5, 0.5]),
-            np.array([5, 1.2]),
-            np.array([3.5, 1.5]),
-            np.array([4, 3.8]),
-            np.array([6.3, 6.5]),
-            np.array([5.0,10.0])
+            np.array([0.5, 0.5, 0, 0]),
+            np.array([5, 1.2, 0, 0]),
+            np.array([3.5, 1.5, 0, 0]),
+            np.array([4, 3.8, 0, 0]),
+            np.array([6.3, 6.5, 0, 0]),
+            np.array([5.5, 0.5, 0, 0]),
         ]
+        
 
         print(
             "Env: mode-{:s}; doneType-{:s}; sample_inside_obs-{}".format(
@@ -132,13 +138,14 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.ndarray: sampled initial state.
         """
         # Define obstacles as a list of (center_x, center_y, radius)
-        self.randomiseObstacles(self.bounds, num_obstacles=3)
+        self.randomiseObstacles(self.bounds, num_obstacles=5)
 
         inside_obs = True
         # Repeat sampling until outside obstacle if needed.
         while inside_obs:
             sample_state = self.observation_space.sample()
             xy_sample = sample_state[:2]
+            sample_state[4:] = self.obs_list
 
             g_x = self.safety_margin(xy_sample)
             inside_obs = (g_x > 0)
@@ -195,6 +202,14 @@ class ContinuousObsAvoidEnv(gym.Env):
             if not overlap:
                 self.obstacles.append((np.array([center_x, center_y]), radius))
                 count += 1
+            
+        if self.add_obs:
+            self.obs_list = np.concatenate([
+                np.concatenate([center.flatten(), np.array([radius], dtype=np.float32)])
+                for center, radius in self.obstacles
+            ])
+        else:
+            self.obs_list = np.array([], dtype=np.float32)
 
     # == Setting Hyper-Parameters ==
     def set_costParam(
@@ -282,7 +297,6 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         safety_margin = np.max(np.array(g_x_list))
 
-        # return np.tanh(safety_margin/3)
         return self.scaling * safety_margin
 
     def target_margin(self, s):
@@ -300,13 +314,10 @@ class ContinuousObsAvoidEnv(gym.Env):
         # target_set_safety_margin
         for _, target_set in enumerate(self.target_x_y_w_h):
             l_x = calculate_margin_rect(s, target_set, negativeInside=True)
-            if l_x < 0:
-                l_x = 1 * l_x
             l_x_list.append(l_x)
 
         target_margin = np.max(np.array(l_x_list))
 
-        # return np.clip(self.scaling * target_margin, -self.scaling, self.scaling)
         return self.scaling * target_margin
 
     # == Getting Information ==
@@ -406,8 +417,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         Returns:
             np.ndarray: next state.
         """
-        # x, y, theta = state
-        x, y = state
+        x, y, theta, v = state[:4]
 
         l_x = self.target_margin(np.array([x, y]))
         g_x = self.safety_margin(np.array([x, y]))
@@ -415,16 +425,19 @@ class ContinuousObsAvoidEnv(gym.Env):
         # one step forward
         # x_dot = x_dot + self.time_step * u[0]
         # y_dot = y_dot + self.time_step * u[1]
-        # theta = theta + self.time_step * u[1]
-        x = x + self.time_step * u[0]
-        y = y + self.time_step * u[1]
+        v = v + self.time_step * u[0]
+        theta = theta + self.time_step * u[1]
+        x = x + self.time_step * np.cos(theta) * v
+        y = y + self.time_step * np.sin(theta) * v
+        
 
         # state = np.array([x, y, theta])
-        state = np.array([x, y])
+        next_state = state.copy()
+        next_state[:4] = np.array([x, y, theta, v])
 
         info = np.array([l_x, g_x])
 
-        return state, info
+        return next_state, info
 
 
     def get_axes(self):
@@ -471,19 +484,21 @@ class ContinuousObsAvoidEnv(gym.Env):
             g_x = self.safety_margin(np.array([x, y]))
 
             if self.mode == 'normal' or self.mode == 'RA' or self.mode == 'AARA' and sacAgent is None:
-                state = torch.FloatTensor([x, y]).to(self.device).unsqueeze(0)
+                state = torch.FloatTensor(np.concatenate([np.array([x, y, 0, 0]), self.obs_list])).to(self.device).unsqueeze(0)
             elif self.mode == 'AARA' and sacAgent is not None:
-                state = torch.FloatTensor([x, y]).to(self.device).unsqueeze(0)
+                state = torch.FloatTensor(np.concatenate([np.array([x, y, 0, 0]), self.obs_list])).to(self.device).unsqueeze(0)
                 _, _, action = sacAgent.protagonist.sample(state)
                 _, _, disturbance = sacAgent.adversary.sample(state)
 
             if addBias:
-                qf1, qf2 = sacAgent.critic(state, action, disturbance)
-                value = torch.min(qf1, qf2)
+                # qf1, qf2 = sacAgent.critic(state, action, disturbance)
+                # value = torch.max(qf1, qf2)
+                value = sacAgent.Q_network(state, action, disturbance) # mean of the critic ensemble (computes max between q1 and q2 already)
                 v[idx] = value + max(l_x, g_x)
             else:
-                qf1, qf2 = sacAgent.critic(state, action, disturbance)
-                value = torch.min(qf1, qf2)
+                # qf1, qf2 = sacAgent.critic(state, action, disturbance)
+                # value = torch.max(qf1, qf2)
+                value = sacAgent.Q_network(state, action, disturbance) # mean of the critic ensemble (computes max between q1 and q2 already)
                 v[idx] = value 
             it.iternext()
         return xs, ys, v
@@ -594,8 +609,8 @@ class ContinuousObsAvoidEnv(gym.Env):
                 print(idx, end='\r')
                 x = xs[idx[0]]
                 y = ys[idx[1]]
-                # state = np.array([x, y, 0])
-                state = np.array([x, y])
+                state = np.concatenate([np.array([x, y, 0, 0]), self.obs_list])
+                # state = np.array([x, y])
                 state_traj, result, traj_val, control_traj = self.simulate_one_trajectory(
                     sacAgent, T=T, state=state, toEnd=toEnd
                 )
@@ -660,10 +675,12 @@ class ContinuousObsAvoidEnv(gym.Env):
         )
 
         # == Plot Trajectories ==
-        self.plot_trajectories(
-            sacAgent, T=self.config.maxSteps, states=self.visual_initial_states, toEnd=False, ax=ax[0]
+        _, state_hist, control_hist = self.plot_trajectories(
+            sacAgent, T=self.config.maxSteps, states=[np.concatenate([arr, self.obs_list]) for arr in self.visual_initial_states], toEnd=False, ax=ax[0], controls=True
         )
 
+        # == Plot State and Control Trajectories ==
+        self.plot_states_controls(state_hist, control_hist, ax=ax)
 
         # == Formatting ==
         # self.plot_formatting(ax=ax[0], labels=labels)
@@ -723,7 +740,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         
     def plot_trajectories(
         self, sacAgent, T=300, num_rnd_traj=None, states=None, toEnd=False,
-        ax=None, c='k', lw=2, zorder=2
+        ax=None, c='k', lw=2, zorder=2, controls=False
     ):
         """Plots trajectories given the agent's Q-network.
 
@@ -792,47 +809,52 @@ class ContinuousObsAvoidEnv(gym.Env):
         sm.set_array([])
         plt.colorbar(sm, cax=cax, label=r'$\hat{V}(s)$ along trajectory', pad=0.15, fraction=0.05, shrink=0.9, location='left')
 
-        # axes = ax[1]
+        return results, state_hist, control_hist 
 
-        # colours = ['blue', 'orange', 'pink', 'green', 'red']
+    def plot_states_controls(self, state_hist, control_hist,ax=None):
 
-        # for i, (traj, states) in enumerate(zip(control_hist, state_hist)):
+        axes = ax[1]
 
-        #     # handle more trajectories than colors
-        #     color = colours[i % len(colours)]
+        colours = ['blue', 'orange', 'pink', 'green', 'red']
 
-        #     # traj: (T_i, control_dim)
-        #     # states: (T_i, state_dim)
+        for i, (traj, states) in enumerate(zip(control_hist, state_hist)):
 
-        #     # T = traj.shape[0]
-        #     # t = np.arange(T)
+            # handle more trajectories than colors
+            color = colours[i % len(colours)]
 
-        #     # --- plot controls ---
-        #     for j in range(traj.shape[1]):  # control dimension
-        #         linestyle = "--" if j == 0 else "-"
-        #         axes.plot(traj[:, j],
-        #                 linestyle=linestyle,
-        #                 color=color,
-        #                 label=f"traj {i} u{j}" if i == 0 else None)
+            # traj: (T_i, control_dim)
+            # states: (T_i, state_dim)
 
-        #     # --- plot states ---
-        #     for j in range(states.shape[1]):  # state dimension
-        #         linestyle = "--" if j == 0 else "-"
-        #         ax[2].plot(states[:, j],
-        #                 linestyle=linestyle,
-        #                 label=f"traj {i} x{j}" if i == 0 else None)
+            # T = traj.shape[0]
+            # t = np.arange(T)
+            if states.shape[0] == 1:
+                continue
 
-        # axes.set_xlabel("time")
-        # axes.set_ylabel("control")
-        # axes.set_title("control history")
-        # axes.legend()
+            # --- plot controls ---
+            for j in range(traj.shape[1]):  # control dimension
+                linestyle = "--" if j == 0 else "-"
+                axes.plot(traj[:, j],
+                        linestyle=linestyle,
+                        color=color,
+                        label=f"traj {i} u{j}" if i == 0 else None)
 
-        # ax[2].set_xlabel("time")
-        # ax[2].set_ylabel("states")
-        # ax[2].set_title("state history")
-        # ax[2].legend()
+            # --- plot states ---
+            for j in range(2):  # state dimension
+                linestyle = "--" if j == 0 else "-"
+                ax[2].plot(states[:, j],
+                        linestyle=linestyle,
+                        color=color,
+                        label=f"traj {i} x{j}" if i == 0 else None)
 
-        return results
+        axes.set_xlabel("time")
+        axes.set_ylabel("control")
+        axes.set_title("control history")
+        axes.legend()
+
+        ax[2].set_xlabel("time")
+        ax[2].set_ylabel("states")
+        ax[2].set_title("state history")
+        ax[2].legend()
 
     def plot_target_failure_set(
         self, ax=None, c_c='m', c_t='y', lw=1.5, zorder=1
