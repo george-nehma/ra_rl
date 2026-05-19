@@ -349,7 +349,7 @@ class ContinuousObsAvoidEnv(gym.Env):
             dict: consist of target margin and safety margin at the new state.
         """
 
-        action, disturbance = action # unpack control and disturbance
+        action, disturbance = np.split(action, self.act_dim, axis =-1) # unpack control and disturbance
         action = action * self.act_bound
         disturbance = disturbance * self.d_bound
         u_tot = action + disturbance
@@ -491,15 +491,15 @@ class ContinuousObsAvoidEnv(gym.Env):
                 _, _, disturbance = sacAgent.adversary.sample(state)
 
             if addBias:
-                # qf1, qf2 = sacAgent.critic(state, action, disturbance)
-                # value = torch.max(qf1, qf2)
-                value = sacAgent.Q_network(state, action, disturbance) # mean of the critic ensemble (computes max between q1 and q2 already)
-                v[idx] = value + max(l_x, g_x)
+                value = sacAgent.critics(state, action, disturbance)
+                v_max = value.max(dim=1).values
+                v_mean = v_max.mean(dim=0)
+                v[idx] = v_mean + max(l_x, g_x)
             else:
-                # qf1, qf2 = sacAgent.critic(state, action, disturbance)
-                # value = torch.max(qf1, qf2)
-                value = sacAgent.Q_network(state, action, disturbance) # mean of the critic ensemble (computes max between q1 and q2 already)
-                v[idx] = value 
+                value = sacAgent.critics(state, action, disturbance)
+                v_max = value.max(dim=1).values
+                v_mean = v_max.mean(dim=0)
+                v[idx] = v_mean 
             it.iternext()
         return xs, ys, v
 

@@ -21,6 +21,7 @@ import time
 from warnings import simplefilter
 
 import gymnasium as gym
+from gymnasium.vector import AsyncVectorEnv
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -41,6 +42,17 @@ from utils.utils import (
 from gym_reachability import gym_reachability    # noqa: F401 — registers envs
 
 import argparse
+
+# need callable to return new env instance for each parallel env.
+def make_env(config, device, sample_inside_obs):
+    def _init():
+        return gym.make(
+            env_name,
+            config=config,
+            device=device,
+            sample_inside_obs=sample_inside_obs,
+        )
+    return _init
 
 matplotlib.use('Agg')
 simplefilter(action='ignore', category=FutureWarning)
@@ -80,6 +92,7 @@ print(args)
 
 # == CONFIGURATION ==
 env_name     = args.envName
+num_envs     = args.numEnvs
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if env_name =="zermelo_show-v0":
@@ -132,21 +145,22 @@ sample_inside_obs = False
 
 # == Environment — passes config=args like updated sim_new_point_mass.py ==
 print("\n== Environment Information ==")
-env = gym.make(
+env = AsyncVectorEnv([make_env(args, device, sample_inside_obs) for _ in range(num_envs)])
+eval_env = gym.make(
     env_name, config=args, device=device,
     sample_inside_obs=sample_inside_obs
 )
-
-stateDim    = env.unwrapped.state.shape[0]
-actionNum   = env.unwrapped.action_space.shape[0]
+stateDim    = env.get_attr("state")[0].shape[0]
+actionNum   = env.get_attr("action_space")[0].shape[0]
 action_list = np.arange(actionNum)
 print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, actionNum))
-print(f"Control Range: low = {env.unwrapped.action_space.low}, high = {env.unwrapped.action_space.high}")
-print(f"Disturbance Range: low = {env.unwrapped.disturbance_space.low}, high = {env.unwrapped.disturbance_space.high}")
+print(f"Control Range: low = {env.get_attr('action_space')[0].low}, high = {env.get_attr('action_space')[0].high}")
+print(f"Disturbance Range: low = {env.get_attr('disturbance_space')[0].low}, high = {env.get_attr('disturbance_space')[0].high}")
 
-env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling)
+env.call("set_costParam", args.penalty, args.reward, args.costType, args.scaling)
 
 env.reset(seed=args.randomSeed)
+eval_env.reset(seed=args.randomSeed)
 
 # == Environment margin plots (unchanged from sim_new_point_mass.py) ==
 if plotFigure or storeFigure:
@@ -156,20 +170,20 @@ if plotFigure or storeFigure:
     v    = np.zeros((nx, ny))
     l_x  = np.zeros((nx, ny))
     g_x  = np.zeros((nx, ny))
-    xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
-    ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
+    xs = np.linspace(eval_env.unwrapped.bounds[0, 0], eval_env.unwrapped.bounds[0, 1], nx)
+    ys = np.linspace(eval_env.unwrapped.bounds[1, 0], eval_env.unwrapped.bounds[1, 1], ny)
     it = np.nditer(v, flags=['multi_index'])
     while not it.finished:
         idx = it.multi_index
         x, y       = xs[idx[0]], ys[idx[1]]
-        g_x[idx]   = env.unwrapped.safety_margin(np.array([x, y]))
-        l_x[idx]   = env.unwrapped.target_margin(np.array([x, y])) # + g_x[idx]
+        g_x[idx]   = eval_env.unwrapped.safety_margin(np.array([x, y]))
+        l_x[idx]   = eval_env.unwrapped.target_margin(np.array([x, y])) # + g_x[idx]
         v[idx]     = np.maximum(l_x[idx], g_x[idx])
         it.iternext()
 
     vmin = round(max(abs(g_x.min()),abs(l_x.max())),1)
     vmax = -vmin
-    axStyle = env.unwrapped.get_axes()
+    axStyle = eval_env.unwrapped.get_axes()
     fig, axes = plt.subplots(1, 3, figsize=(12, 6))
     for ax, data, title in zip(
         axes, [l_x, g_x, v],
@@ -185,7 +199,7 @@ if plotFigure or storeFigure:
                             ticks=[vmin, 0, vmax])
         cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=24)
         ax.set_title(title, fontsize=18)
-        env.unwrapped.plot_target_failure_set(ax=ax)
+        eval_env.unwrapped.plot_target_failure_set(ax=ax)
         # env.unwrapped.plot_formatting(ax=ax)
     # env.unwrapped.plot_reach_avoid_set(axes[2])
     fig.tight_layout()
@@ -259,10 +273,10 @@ if script_args.checkpoint is None:
 # == PROTAGONIST — DDQNEnsemble ==========================================
 # CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
 dimList     = [stateDim] + CONFIG.ARCHITECTURE + [actionNum]
-sacAgent = SAC(CONFIG, dimList=dimList, action_space=env.unwrapped.action_space, disturbance_space=env.unwrapped.disturbance_space)  
+sacAgent = SAC(CONFIG, dimList=dimList, action_space=env.get_attr("action_space")[0], disturbance_space=env.get_attr("disturbance_space")[0])  
 print(sacAgent)
 print("We want to use: {}, and Agent uses: {}".format(device, sacAgent.device))
-print("Critic is using cuda: ", next(sacAgent.critic.parameters()).is_cuda)
+print("Critic is using cuda: ", next(sacAgent.critics.parameters()).is_cuda)
 
 if script_args.checkpoint is not None:
     sacAgent.load_checkpoint(script_args.checkpointVal, outFolder, evaluate=True)
@@ -282,16 +296,16 @@ else:
 #     )
 
 # == TRAINER ==
-trainer = SACTrainer(sacAgent, CONFIG)
+trainer = SACTrainer(sacAgent, CONFIG, env)
 
-# == TRAINING — Trainer.learn unchanged ==================================
+# == TRAINING — Trainer.learn unchanged ==================================eval_
 print("\n== Training Information ==")
 vmin        = -1 * args.scaling
 vmax        =  1 * args.scaling
 checkPeriod = args.checkPeriod
 
 trainRecords, trainProgress = trainer.learn(
-    env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
+    env, eval_env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
     doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
     checkPeriod=checkPeriod, outFolder=outFolder, storeBest=args.storeBest,
     plotFigure=args.plotFigure, storeFigure=args.storeFigure, 
@@ -353,10 +367,10 @@ if plotFigure or storeFigure:
     # -- grid rollout eval (identical to sim_new_point_mass.py) -----------
     nx = 41
     ny = 121
-    na = env.unwrapped.action_space.shape[0]
-    nd = env.unwrapped.disturbance_space.shape[0]
-    xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
-    ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
+    na = eval_env.unwrapped.action_space.shape[0]
+    nd = eval_env.unwrapped.disturbance_space.shape[0]
+    xs = np.linspace(eval_env.unwrapped.bounds[0, 0], eval_env.unwrapped.bounds[0, 1], nx)
+    ys = np.linspace(eval_env.unwrapped.bounds[1, 0], eval_env.unwrapped.bounds[1, 1], ny)
 
     resultMtx      = np.empty((nx, ny), dtype=int)
     actDistMtx     = np.empty((nx, ny, na), dtype=float)
@@ -373,7 +387,7 @@ if plotFigure or storeFigure:
         idx_cell = it.multi_index
         print(idx_cell, end='\r')
         x, y  = xs[idx_cell[0]], ys[idx_cell[1]]
-        state = np.concatenate([np.array([x, y, 0, 0]), env.unwrapped.obs_list])
+        state = np.concatenate([np.array([x, y, 0, 0]), eval_env.unwrapped.obs_list])
 
         stateTensor  = torch.FloatTensor(state).to(device).unsqueeze(0)
         _, _, action = sacAgent.protagonist.sample(stateTensor)
@@ -387,11 +401,11 @@ if plotFigure or storeFigure:
         varMtx    [idx_cell] = unc["epistemic_uncertainty"].item()
         disAgreeMtx[idx_cell] = unc["safe_disagreement"].item()
 
-        _, result, _, _ = env.unwrapped.simulate_one_trajectory(
+        _, result, _, _ = eval_env.unwrapped.simulate_one_trajectory(
             sacAgent, T=250, state=state
         )
 
-        g_x_val         = env.unwrapped.safety_margin(state)
+        g_x_val         = eval_env.unwrapped.safety_margin(state)
         # inside_max_diag = env.unwrapped.is_inside_diagonal_region(state)
         # inside_min_diag = env.unwrapped.is_inside_diagonal_region(state, min=True)
         if g_x_val > 0:
@@ -417,12 +431,12 @@ if plotFigure or storeFigure:
         disturbDistMtx=disturbDistMtx, figureFolder=figureFolder,
         plotFigure=plotFigure, storeFigure=storeFigure, actionNum=actionNum,
     )
-    plot_RA_eval(env, sacAgent, cfg)
+    plot_RA_eval(eval_env, sacAgent, cfg)
     # plot_protagonist_adversary_actions(env, cfg)
 
     # -- ADDED: 4-panel epistemic uncertainty figure ----------------------
     sacAgent.plot_uncertainty_maps(
-        env,
+        eval_env,
         out_folder=figureFolder,
         nx=41, ny=ny,
         vmin=vmin, vmax=vmax,
@@ -431,7 +445,7 @@ if plotFigure or storeFigure:
     )
 
     # -- ADDED: uncertainty overlay on rollout grid -----------------------
-    axStyle = env.unwrapped.get_axes()
+    axStyle = eval_env.unwrapped.get_axes()
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
 
     ax = axes[0]
@@ -441,9 +455,9 @@ if plotFigure or storeFigure:
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
     ax.set_title(r'Epistemic Uncertainty  Var$_k[Q]$', fontsize=14)
-    env.unwrapped.plot_target_failure_set(ax=ax)
+    eval_env.unwrapped.plot_target_failure_set(ax=ax)
     # env.unwrapped.plot_reach_avoid_set(ax=ax)
-    env.unwrapped.plot_formatting(ax=ax)
+    eval_env.unwrapped.plot_formatting(ax=ax)
 
     ax = axes[1]
     im = ax.imshow(
@@ -452,9 +466,9 @@ if plotFigure or storeFigure:
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
     ax.set_title('Safe / Unsafe Disagreement', fontsize=14)
-    env.unwrapped.plot_target_failure_set(ax=ax)
+    eval_env.unwrapped.plot_target_failure_set(ax=ax)
     # env.unwrapped.plot_reach_avoid_set(ax=ax)
-    env.unwrapped.plot_formatting(ax=ax)
+    eval_env.unwrapped.plot_formatting(ax=ax)
 
     fig.suptitle(
         f"Protagonist Ensemble ({args.numCritics} critics | mode={args.mode})",

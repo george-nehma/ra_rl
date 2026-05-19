@@ -53,10 +53,10 @@ class SACTrainer:
             MEMORY_CAPACITY, BATCH_SIZE, and optionally DEVICE.
     """
 
-    def __init__(self, sac_agent: SAC, CONFIG):
+    def __init__(self, sac_agent: SAC, CONFIG, env):
         self.agent  = sac_agent
         self.CONFIG = CONFIG
-        self.memory = ReplayMemory(CONFIG.MEMORY_CAPACITY) # shared ReplayMemory
+        self.memory = ReplayMemory(CONFIG.MEMORY_CAPACITY, env) # shared ReplayMemory
 
     # ------------------------------------------------------------------
     # Replay buffer helpers
@@ -77,30 +77,27 @@ class SACTrainer:
         cnt = 0
         s, info = env.reset()
         while len(self.memory) < self.memory.capacity:
-            cnt += 1
+            cnt += env.num_envs
             print("\rWarmup Buffer [{:d}]".format(cnt), end="")
 
             # Random continuous actions sampled from the action space
             u = env.action_space.sample()   # protagonist
             d = env.action_space.sample()   # adversary
 
-            s_, r, done, _, info = env.step((u, d))
+            input = np.concatenate([u,d], axis=1)
 
-            s_store  = None if done else s_
-            # Pre-compute the next protagonist action (needed for certain
-            # RA-backup variants that use a_ just like the DDQN trainer).
-            # if done:
-                # a_next = None
-            # else:
+            s_, r, done, _, info = env.step(input)
             a_next, _ = self.agent.select_action(s_, explore=True)
+            info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
 
-            self.store_transition(s, u, d, r, s_store, a_next, info)
+            self.store_transition(s, u, d, r, s_, a_next, done, info)
 
-            if done:
-                s, info = env.reset()
-            else:
-                s = s_
+            # reset ONLY environments that are done
+            if np.any(done):
+                reset_obs, _ = env.reset()   # shape: (num_envs, obs_dim)
 
+                s_ = np.where(done[:, None], reset_obs, s_)
+            s = s_
         print(" --- Warmup Buffer Ends")
 
     # ------------------------------------------------------------------
@@ -110,6 +107,7 @@ class SACTrainer:
     def learn(
         self,
         env,
+        eval_env,
         MAX_UPDATES    = 2_000_000,
         MAX_EP_STEPS   = 100,
         warmupQ        = False,
@@ -198,149 +196,159 @@ class SACTrainer:
         # Main loop
         # ----------------------------------------------------------------
         t0_learn = time.time()
-
+        s, info = env.reset()
+        _, _ = eval_env.reset()
+        step_num = np.zeros(env.num_envs, dtype=int)
+        epCost  = np.zeros(env.num_envs, dtype=np.float64)
+        ep += env.num_envs
         while cntUpdate <= MAX_UPDATES:
-            s, info = env.reset()
-            epCost  = 0.0
-            ep     += 1
+            
+            
+            # ---- action selection ----------------------------------
+            # explore=True → stochastic (reparameterised) sample
+            # explore=False → deterministic mean action
+            u, d = self.agent.select_action(s, explore=True)
 
-            for step_num in range(MAX_EP_STEPS):
-                # ---- action selection ----------------------------------
-                # explore=True → stochastic (reparameterised) sample
-                # explore=False → deterministic mean action
-                u, d = self.agent.select_action(s, explore=True)
+            # ---- environment step ----------------------------------
+            input = np.concatenate([u,d], axis=1)
+            s_, r, done, _, info = env.step(input)
+            info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
+            epCost += r
+            step_num += 1
+            # terminal_step = done or (step_num == MAX_EP_STEPS - 1)
+            # s_store  = None if terminal_step else s_
+            # a_next   = None
+            # if not terminal_step:
+            a_next, _ = self.agent.select_action(s_, explore=True)
 
-                # ---- environment step ----------------------------------
-                s_, r, done, _, info = env.step((u, d))
-                epCost += r
+            self.store_transition(s, u, d, r, s_, a_next, done, info)
 
-                terminal_step = done or (step_num == MAX_EP_STEPS - 1)
-                s_store  = None if terminal_step else s_
-                # a_next   = None
-                # if not terminal_step:
-                a_next, _ = self.agent.select_action(s_, explore=True)
+            # ---- periodic evaluation --------------------------------
+            if cntUpdate != 0 and cntUpdate % checkPeriod == 0:
+                results = eval_env.unwrapped.simulate_trajectories( 
+                                self.agent, 
+                                T=MAX_EP_STEPS, 
+                                num_rnd_traj=numRndTraj
+                            )[1]
 
-                self.store_transition(s, u, d, r, s_store, a_next, info)
-                s = s_
+                success  = np.sum(results ==  1) / results.shape[0]
+                failure  = np.sum(results == -1) / results.shape[0]
+                unfinish = np.sum(results ==  0) / results.shape[0]
+                trainProgress.append([success, failure, unfinish])
 
-                # ---- periodic evaluation --------------------------------
-                if cntUpdate != 0 and cntUpdate % checkPeriod == 0:
-                    results = env.unwrapped.simulate_trajectories(
-                        self.agent,
-                        T=MAX_EP_STEPS,
-                        num_rnd_traj=numRndTraj,
-                    )[1]
-
-                    success  = np.sum(results ==  1) / results.shape[0]
-                    failure  = np.sum(results == -1) / results.shape[0]
-                    unfinish = np.sum(results ==  0) / results.shape[0]
-                    trainProgress.append([success, failure, unfinish])
-
-                    if verbose:
-                        pro_lr = self.agent.critic_optim.state_dict(
-                        )["param_groups"][0]["lr"]
-                        print("\nAfter [{:d}] updates:".format(cntUpdate))
-                        print(
-                            "  - epi_uncertainty={:.4f}, pro_alpha={:.7f},"
-                            " pro_lr={:.7e}, gamma={:.7e}.".format(
-                                epistemic_uncertainty,
-                                float(self.agent.alpha_pro),
-                                pro_lr,
-                                self.agent.GAMMA,
-                            )
+                if verbose:
+                    pro_lr = self.agent.critic_optim.state_dict(
+                    )["param_groups"][0]["lr"]
+                    print("\nAfter [{:d}] updates:".format(cntUpdate))
+                    print(
+                        "  - epi_uncertainty={:.4f}, pro_alpha={:.7f},"
+                        " pro_lr={:.7e}, gamma={:.7e}.".format(
+                            epistemic_uncertainty,
+                            float(self.agent.alpha_pro),
+                            pro_lr,
+                            self.agent.GAMMA,
                         )
-                        print("  - success/failure/unfinished:", end=" ")
-                        with np.printoptions(
-                            formatter={"float": "{: .3f}".format}
-                        ):
-                            print(np.array([success, failure, unfinish]))
+                    )
+                    print("  - success/failure/unfinished:", end=" ")
+                    with np.printoptions(
+                        formatter={"float": "{: .3f}".format}
+                    ):
+                        print(np.array([success, failure, unfinish]))
 
-                    if storeModel:
-                        if storeBest:
-                            if success > checkPointSucc:
-                                checkPointSucc = success
-                                self._save_models(
-                                    cntUpdate+itr_init,
-                                    pro_modelFolder,
-                                    adv_modelFolder,
-                                )
-                        else:
+                if storeModel:
+                    if storeBest:
+                        if success > checkPointSucc:
+                            checkPointSucc = success
                             self._save_models(
-                                cntUpdate+itr_init, pro_modelFolder, adv_modelFolder
+                                cntUpdate+itr_init,
+                                pro_modelFolder,
+                                adv_modelFolder,
                             )
-
-                    if (plotFigure or storeFigure) and plotTrainValue:
-                        self.agent.Q_network.eval()
-                        env.unwrapped.visualize(
-                            self.agent,
-                            vmin=0 if showBool else vmin,
-                            vmax=vmax,
-                            boolPlot=showBool,
-                            cmap="seismic",
+                    else:
+                        self._save_models(
+                            cntUpdate+itr_init, pro_modelFolder, adv_modelFolder
                         )
-                        if storeFigure:
-                            figurePath = os.path.join(
-                                figureFolder, "{:d}.png".format(cntUpdate+itr_init)
-                            )
-                            plt.savefig(figurePath)
-                        if plotFigure:
-                            plt.pause(0.001)
-                        plt.clf()
-                        plt.close("all")
 
-                # ---- gradient update -----------------------------------
-                losses = self.agent.update(
-                    self.memory,
-                    batch_size=self.CONFIG.BATCH_SIZE,
-                    updates=cntUpdate
-                )
-                self.agent.updateHyperParam()
-                if losses is not None:
-                    (
+                if (plotFigure or storeFigure) and plotTrainValue:
+                    self.agent.critics.eval()
+                    eval_env.unwrapped.visualize(
+                        self.agent,
+                        vmin=0 if showBool else vmin,
+                        vmax=vmax,
+                        boolPlot=showBool,
+                        cmap="seismic",
+                    )
+                    if storeFigure:
+                        figurePath = os.path.join(
+                            figureFolder, "{:d}.png".format(cntUpdate+itr_init)
+                        )
+                        plt.savefig(figurePath)
+                    if plotFigure:
+                        plt.pause(0.001)
+                    plt.clf()
+                    plt.close("all")
+
+            # ---- gradient update -----------------------------------
+            losses = self.agent.update(
+                self.memory,
+                batch_size=self.CONFIG.BATCH_SIZE,
+                updates=cntUpdate
+            )
+            self.agent.updateHyperParam()
+            if losses is not None:
+                (
+                    qf1_loss,
+                    qf2_loss,
+                    pro_loss,
+                    adv_loss,
+                    alpha_tlogs,
+                    epistemic_uncertainty
+                ) = losses
+                # Use critic loss spread as a proxy for epistemic
+                # uncertainty (larger disagreement → higher uncertainty).
+                # epistem_uncertainty = abs(qf1_loss - qf2_loss) + 1e-8
+                trainingRecords.append(
+                    [
                         qf1_loss,
                         qf2_loss,
                         pro_loss,
                         adv_loss,
-                        alpha_tlogs,
-                        epistemic_uncertainty
-                    ) = losses
-                    # Use critic loss spread as a proxy for epistemic
-                    # uncertainty (larger disagreement → higher uncertainty).
-                    # epistem_uncertainty = abs(qf1_loss - qf2_loss) + 1e-8
-                    trainingRecords.append(
-                        [
-                            qf1_loss,
-                            qf2_loss,
-                            pro_loss,
-                            adv_loss,
-                            float(alpha_tlogs),
-                            float(epistemic_uncertainty)
-                        ]
-                    )
-                
-                # Log losses
-                logger.add_scalar("Loss/protagonist", pro_loss, cntUpdate+itr_init)
-                logger.add_scalar("Loss/adversary", adv_loss, cntUpdate+itr_init)
-                logger.add_scalar("Loss/critic1", qf1_loss, cntUpdate+itr_init)
-                logger.add_scalar("Loss/critic2", qf2_loss, cntUpdate+itr_init)
-                logger.add_scalar("HyperParam/alpha_pro", float(alpha_tlogs), cntUpdate+itr_init)
-                logger.add_scalar("HyperParam/Epistemic_uncertainty", float(epistemic_uncertainty), cntUpdate+itr_init)
+                        float(alpha_tlogs),
+                        float(epistemic_uncertainty)
+                    ]
+                )
+            
+            # Log losses
+            logger.add_scalar("Loss/protagonist", pro_loss, cntUpdate+itr_init)
+            logger.add_scalar("Loss/adversary", adv_loss, cntUpdate+itr_init)
+            logger.add_scalar("Loss/critic1", qf1_loss, cntUpdate+itr_init)
+            logger.add_scalar("Loss/critic2", qf2_loss, cntUpdate+itr_init)
+            logger.add_scalar("HyperParam/alpha_pro", float(alpha_tlogs), cntUpdate+itr_init)
+            logger.add_scalar("HyperParam/Epistemic_uncertainty", float(epistemic_uncertainty), cntUpdate+itr_init)
 
-                cntUpdate += 1
-
-                if done and doneTerminate:
-                    break
+            cntUpdate += env.num_envs
 
             # ---- episode report ----------------------------------------
-            runningCost = runningCost * 0.9 + epCost * 0.1
+            runningCost = runningCost * 0.9 + epCost.sum() * 0.1
             if verbose:
                 print(
                     "\r[ep {:d} | upd {:d}]: running/ep cost ="
-                    " ({:.2f}/{:.2f}), {:d} steps.".format(
-                        ep, cntUpdate, runningCost, epCost, step_num + 1
+                    " ({:.2f}/{:.2f}).".format(
+                        ep, cntUpdate, runningCost.mean(), epCost.sum()
                     ),
                     end="",
                 )
+
+            if (done.any() and doneTerminate) or step_num.any() >= MAX_EP_STEPS:
+                print(env.get_attr("state"))
+                reset_obs, _ = env.reset()   # shape: (num_envs, obs_dim) NOTE: this will reset the obstacles (okay for now as the seed=0)
+                print(env.get_attr("state")) # reset only the environments that are done
+                
+                s_ = np.where(done[:, None], reset_obs, s_)
+                ep     += 1
+                epCost = np.where(done, 0.0, epCost)
+                step_num = np.where(done, 0, step_num)
+            s = s_
 
             # ---- early stopping ----------------------------------------
             if runningCostThr is not None and runningCost <= runningCostThr:

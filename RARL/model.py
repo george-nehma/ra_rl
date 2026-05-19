@@ -283,24 +283,23 @@ def build_mlp(dimList, activation):
 
     return nn.Sequential(*layers)
 
-class ValueNetwork(nn.Module):
-    def __init__(self,CONFIG, dimList):
-        super(ValueNetwork, self).__init__()
+# class ValueNetwork(nn.Module):
+#     def __init__(self,CONFIG, dimList):
+#         super(ValueNetwork, self).__init__()
 
-        self.config = CONFIG
-        self.actType = CONFIG.ACTIVATION
-        sa_dimList = dimList.copy()
-        sa_dimList[-1] = 1  # output is Q-value
+#         self.config = CONFIG
+#         self.actType = CONFIG.ACTIVATION
+#         sa_dimList = dimList.copy()
+#         sa_dimList[-1] = 1  # output is Q-value
 
-        self.value_head = build_mlp(sa_dimList, self.actType)
+#         self.value_head = build_mlp(sa_dimList, self.actType)
 
-        self.apply(weights_init_)
+#         self.apply(weights_init_)
 
-    def forward(self, state):
-        x = self.value_head(state)
-        return x
-
-
+#     def forward(self, state):
+#         x = self.value_head(state)
+#         return x
+    
 class QNetwork(nn.Module):
     def __init__(self, CONFIG, dimList, numActions, numDisturb):
         super(QNetwork, self).__init__()
@@ -325,6 +324,29 @@ class QNetwork(nn.Module):
 
         return x1, x2
 
+class QEnsemble(nn.Module):
+    def __init__(self, CONFIG, dimList, numActions, numDisturb, num_critics):
+        super().__init__()
+        self.num_critics = num_critics
+
+        self.critics = nn.ModuleList([
+            QNetwork(CONFIG, dimList, numActions, numDisturb)
+            for _ in range(num_critics)
+        ])
+
+    def forward(self, state, action, disturbance):
+        """
+        Returns a tensor of shape (num_critics, batch, 2)
+        because each QNetwork returns (Q1, Q2).
+        """
+        q_values = []
+        for critic in self.critics:
+            q1, q2 = critic(state, action, disturbance)
+            # q1 = q1.squeeze(-1) 
+            # q2 = q2.squeeze(-1) 
+            q_values.append(torch.stack([q1, q2], dim=0))  # shape (2, B, 1)
+
+        return torch.stack(q_values, dim=0)
 
 class GaussianPolicy(nn.Module):
     def __init__(self, CONFIG, dimList, numActions, action_space=None, conditioned_sigma=False):
@@ -426,58 +448,3 @@ class DeterministicPolicy(nn.Module):
         self.noise = self.noise.to(device)
         return super(DeterministicPolicy, self).to(device)
     
-
-class VectorizedLinear(nn.Module):
-    """
-    A linear layer that computes outputs for N critics in parallel.
-    Weight shape: (num_critics, out_features, in_features)
-    Bias shape: (num_critics, out_features)
-    """
-    def __init__(self, in_features, out_features, num_critics):
-        super().__init__()
-        self.num_critics = num_critics
-        self.weight = nn.Parameter(torch.randn(num_critics, out_features, in_features))
-        self.bias = nn.Parameter(torch.randn(num_critics, out_features))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        for i in range(self.num_critics):
-            nn.init.xavier_uniform_(self.weight[i], gain=1)
-            nn.init.constant_(self.bias[i], 0)
-
-    def forward(self, x):
-        # x: (batch, in_features) -> (num_critics, batch, in_features)
-        x_expanded = x.unsqueeze(0).expand(self.num_critics, -1, -1)
-        # res: (num_critics, batch, out_features)
-        res = torch.matmul(x_expanded, self.weight.transpose(-1, -2))
-        return res + self.bias.unsqueeze(1)
-
-class VectorizedMLP(nn.Module):
-    """
-    A multi-layer perceptron that computes outputs for N critics in parallel.
-    """
-    def __init__(self, dimList, actType="Tanh", num_critics=1, output_activation=nn.Identity):
-        super().__init__()
-        self.num_critics = num_critics
-        self.moduleList = nn.ModuleList()
-        numLayer = len(dimList) - 1
-        for idx in range(numLayer):
-            i_dim = dimList[idx]
-            o_dim = dimList[idx + 1]
-            self.moduleList.append(VectorizedLinear(i_dim, o_dim, num_critics))
-            if idx < numLayer - 1:
-                if actType == "Sin":
-                    self.moduleList.append(Sin())
-                elif actType == "Tanh":
-                    self.moduleList.append(nn.Tanh())
-                elif actType == "ReLU":
-                    self.moduleList.append(nn.ReLU())
-                else:
-                    raise ValueError(f"Activation type {actType} not supported!")
-
-        self.output_act = output_activation()
-
-    def forward(self, x):
-        for m in self.moduleList:
-            x = m(x)
-        return self.output_act(x)
