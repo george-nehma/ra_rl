@@ -4,7 +4,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import torch
 import random
-from .env_utils import calculate_margin_rect, calculate_margin_circle
+from .env_utils import calculate_margin_rect, calculate_margin_circle, calculate_margin_circle_batch, calculate_margin_rect_batch
 
 from matplotlib.collections import LineCollection
 import matplotlib.cm as cm
@@ -320,6 +320,28 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         return self.scaling * target_margin
 
+    def safety_margin_batch(self, positions):
+        """positions: (N, 2) → (N,)"""
+        g_x_list = []
+        for constraint_set in self.obstacles:
+            g_x = calculate_margin_circle_batch(positions, constraint_set, negativeInside=False)  # (N,)
+            g_x_list.append(g_x)
+
+        boundary = np.append(self.midpoint, self.interval)
+        g_x = calculate_margin_rect_batch(positions, boundary, negativeInside=True)  # (N,)
+        g_x_list.append(g_x)
+
+        return self.scaling * np.max(np.stack(g_x_list, axis=0), axis=0)  # (N,)
+
+    def target_margin_batch(self, positions):
+        """positions: (N, 2) → (N,)"""
+        l_x_list = []
+        for target_set in self.target_x_y_w_h:
+            l_x = calculate_margin_rect_batch(positions, target_set, negativeInside=True)  # (N,)
+            l_x_list.append(l_x)
+
+        return self.scaling * np.max(np.stack(l_x_list, axis=0), axis=0)  # (N,)
+    
     # == Getting Information ==
     def check_within_env(self, state):
         """Checks if the robot is still in the environment.
@@ -349,7 +371,7 @@ class ContinuousObsAvoidEnv(gym.Env):
             dict: consist of target margin and safety margin at the new state.
         """
 
-        action, disturbance = action # unpack control and disturbance
+        action, disturbance = np.split(action, self.act_dim, axis =-1) # unpack control and disturbance
         action = action * self.act_bound
         disturbance = disturbance * self.d_bound
         u_tot = action + disturbance
@@ -418,9 +440,6 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.ndarray: next state.
         """
         x, y, theta, v = state[:4]
-
-        l_x = self.target_margin(np.array([x, y]))
-        g_x = self.safety_margin(np.array([x, y]))
         
         # one step forward
         # x_dot = x_dot + self.time_step * u[0]
@@ -430,6 +449,8 @@ class ContinuousObsAvoidEnv(gym.Env):
         x = x + self.time_step * np.cos(theta) * v
         y = y + self.time_step * np.sin(theta) * v
         
+        l_x = self.target_margin(np.array([x, y]))
+        g_x = self.safety_margin(np.array([x, y]))
 
         # state = np.array([x, y, theta])
         next_state = state.copy()
@@ -439,6 +460,26 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         return next_state, info
 
+    def integrate_forward_batch(self, states, u_batch):
+        """
+        states:  (N, state_dim)
+        u_batch: (N, 2)
+        returns: (N, state_dim)
+        """
+        next_states = states.clone()
+        # Convert to CPU for NumPy operations
+        states_cpu = states.cpu()
+
+        v     = states_cpu[:, 3] + self.time_step * u_batch[:, 0]
+        theta = states_cpu[:, 2] + self.time_step * u_batch[:, 1]
+        x     = states_cpu[:, 0] + self.time_step * np.cos(theta) * v
+        y     = states_cpu[:, 1] + self.time_step * np.sin(theta) * v
+
+        next_states[:, 0] = x
+        next_states[:, 1] = y
+        next_states[:, 2] = theta
+        next_states[:, 3] = v
+        return next_states
 
     def get_axes(self):
         """Gets the axes bounds and aspect_ratio.
@@ -597,29 +638,30 @@ class ContinuousObsAvoidEnv(gym.Env):
         values = []
 
         if states is None:
-            nx = 41
-            ny = 100
-            xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
-            ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
-            results = np.empty((nx, ny), dtype=int)
-            it = np.nditer(results, flags=['multi_index'])
-            print()
-            while not it.finished:
-                idx = it.multi_index
-                print(idx, end='\r')
-                x = xs[idx[0]]
-                y = ys[idx[1]]
-                state = np.concatenate([np.array([x, y, 0, 0]), self.obs_list])
-                # state = np.array([x, y])
-                state_traj, result, traj_val, control_traj = self.simulate_one_trajectory(
-                    sacAgent, T=T, state=state, toEnd=toEnd
-                )
-                values.append(traj_val)
-                state_hist.append(state_traj)
-                control_hist.append(control_traj)
-                results[idx] = result
-                it.iternext()
-            results = results.reshape(-1)
+            # nx = 41
+            # ny = 100
+            # xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
+            # ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
+            # results = np.empty((nx, ny), dtype=int)
+            # it = np.nditer(results, flags=['multi_index'])
+            # print()
+            # while not it.finished:
+            #     idx = it.multi_index
+            #     print(idx, end='\r')
+            #     x = xs[idx[0]]
+            #     y = ys[idx[1]]
+            #     state = np.concatenate([np.array([x, y, 0, 0]), self.obs_list])
+            #     # state = np.array([x, y])
+            #     state_traj, result, traj_val, control_traj = self.simulate_one_trajectory(
+            #         sacAgent, T=T, state=state, toEnd=toEnd
+            #     )
+            #     values.append(traj_val)
+            #     state_hist.append(state_traj)
+            #     control_hist.append(control_traj)
+            #     results[idx] = result
+            #     it.iternext()
+            # results = results.reshape(-1)
+            state_hist, results, values, control_hist = self.simulate_all_trajectories(sacAgent, T=T, toEnd=toEnd)
         else:
             results = np.empty(shape=(len(states),), dtype=int)
             for idx, state in enumerate(states):
@@ -633,6 +675,58 @@ class ContinuousObsAvoidEnv(gym.Env):
                 results[idx] = result
 
         return state_hist, results, values, control_hist
+
+    def simulate_all_trajectories(self, sacAgent, T=250, toEnd=False):
+        protagonist = sacAgent.protagonist
+        adversary = sacAgent.adversary
+
+        nx, ny = 41, 100
+        xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
+        ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
+        N = nx * ny
+
+        # All starting states at once: (N, state_dim)
+        states_np = np.array([
+            np.concatenate([np.array([xs[i], ys[j], 0, 0]), self.obs_list])
+            for i in range(nx) for j in range(ny)
+        ])
+
+        states = torch.FloatTensor(states_np).to(self.device)  # (N, state_dim)
+        results = np.zeros(N, dtype=int)
+        done = np.zeros(N, dtype=bool)
+
+        state_hist = [states_np.copy()]
+        control_hist = []
+        traj_vals = [[max(self.target_margin(states_np[i, :2]), self.safety_margin(states_np[i, :2])) for i in range(N)]]
+
+        for t in range(T):
+            positions = states[:, :2]                          # (N, 2) — numpy, no loop
+
+            safety = self.safety_margin_batch(positions.cpu().numpy())       # (N,)
+            target = self.target_margin_batch(positions.cpu().numpy())       # (N,)
+
+            results[(~done) & (safety > 0)] = -1
+            results[(~done) & (target <= 0)] = 1
+            done |= (safety > 0) | (target <= 0)
+            if done.all():
+                break
+
+            active = ~done
+            active_states_t = torch.FloatTensor(states[active].cpu().numpy()).to(self.device)
+
+            with torch.no_grad():
+                _, _, actions = protagonist.sample(active_states_t)  # one batched forward pass
+                _, _, disturbs = adversary.sample(active_states_t)   # one batched forward pass
+
+            u_tot = (actions.cpu().numpy() * self.act_bound
+                + disturbs.cpu().numpy() * self.d_bound)
+
+            states[active] = self.integrate_forward_batch(states[active], u_tot)  # pure numpy
+
+            state_hist.append(states.cpu().numpy().copy())
+            control_hist.append(u_tot)
+
+        return state_hist, results.reshape(nx, ny), traj_vals, control_hist
 
     # == Visualizing ==
     def render(self):

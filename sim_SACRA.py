@@ -81,6 +81,7 @@ print(args)
 # == CONFIGURATION ==
 env_name     = args.envName
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+num_envs      = args.numEnvs
 
 if env_name =="zermelo_show-v0":
     env_title = "point-mass" 
@@ -132,21 +133,26 @@ sample_inside_obs = False
 
 # == Environment — passes config=args like updated sim_new_point_mass.py ==
 print("\n== Environment Information ==")
-env = gym.make(
+train_envs = gym.make_vec(
+    env_name, num_envs=num_envs, config=args, device=device,
+    sample_inside_obs=sample_inside_obs
+)
+eval_env = gym.make(
     env_name, config=args, device=device,
     sample_inside_obs=sample_inside_obs
 )
 
-stateDim    = env.unwrapped.state.shape[0]
-actionNum   = env.unwrapped.action_space.shape[0]
+stateDim    = eval_env.unwrapped.state.shape[0]
+actionNum   = eval_env.unwrapped.action_space.shape[0]
 action_list = np.arange(actionNum)
 print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, actionNum))
-print(f"Control Range: low = {env.unwrapped.action_space.low}, high = {env.unwrapped.action_space.high}")
-print(f"Disturbance Range: low = {env.unwrapped.disturbance_space.low}, high = {env.unwrapped.disturbance_space.high}")
+print(f"Control Range: low = {eval_env.unwrapped.action_space.low}, high = {eval_env.unwrapped.action_space.high}")
+print(f"Disturbance Range: low = {eval_env.unwrapped.disturbance_space.low}, high = {eval_env.unwrapped.disturbance_space.high}")
 
-env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling)
+eval_env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling)
 
-env.reset(seed=args.randomSeed)
+train_envs.reset(seed=args.randomSeed)
+eval_env.reset(seed=args.randomSeed)
 
 # == Environment margin plots (unchanged from sim_new_point_mass.py) ==
 if plotFigure or storeFigure:
@@ -156,20 +162,20 @@ if plotFigure or storeFigure:
     v    = np.zeros((nx, ny))
     l_x  = np.zeros((nx, ny))
     g_x  = np.zeros((nx, ny))
-    xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
-    ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
+    xs = np.linspace(eval_env.unwrapped.bounds[0, 0], eval_env.unwrapped.bounds[0, 1], nx)
+    ys = np.linspace(eval_env.unwrapped.bounds[1, 0], eval_env.unwrapped.bounds[1, 1], ny)
     it = np.nditer(v, flags=['multi_index'])
     while not it.finished:
         idx = it.multi_index
         x, y       = xs[idx[0]], ys[idx[1]]
-        g_x[idx]   = env.unwrapped.safety_margin(np.array([x, y]))
-        l_x[idx]   = env.unwrapped.target_margin(np.array([x, y])) # + g_x[idx]
+        g_x[idx]   = eval_env.unwrapped.safety_margin(np.array([x, y]))
+        l_x[idx]   = eval_env.unwrapped.target_margin(np.array([x, y])) # + g_x[idx]
         v[idx]     = np.maximum(l_x[idx], g_x[idx])
         it.iternext()
 
     vmin = round(max(abs(g_x.min()),abs(l_x.max())),1)
     vmax = -vmin
-    axStyle = env.unwrapped.get_axes()
+    axStyle = eval_env.unwrapped.get_axes()
     fig, axes = plt.subplots(1, 3, figsize=(12, 6))
     for ax, data, title in zip(
         axes, [l_x, g_x, v],
@@ -185,7 +191,7 @@ if plotFigure or storeFigure:
                             ticks=[vmin, 0, vmax])
         cbar.ax.set_yticklabels(labels=[vmin, 0, vmax], fontsize=24)
         ax.set_title(title, fontsize=18)
-        env.unwrapped.plot_target_failure_set(ax=ax)
+        eval_env.unwrapped.plot_target_failure_set(ax=ax)
         # env.unwrapped.plot_formatting(ax=ax)
     # env.unwrapped.plot_reach_avoid_set(axes[2])
     fig.tight_layout()
@@ -259,7 +265,7 @@ if script_args.checkpoint is None:
 # == PROTAGONIST — DDQNEnsemble ==========================================
 # CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
 dimList     = [stateDim] + CONFIG.ARCHITECTURE + [actionNum]
-sacAgent = SAC(CONFIG, dimList=dimList, action_space=env.unwrapped.action_space, disturbance_space=env.unwrapped.disturbance_space)  
+sacAgent = SAC(CONFIG, dimList=dimList, action_space=eval_env.unwrapped.action_space, disturbance_space=eval_env.unwrapped.disturbance_space)  
 print(sacAgent)
 print("We want to use: {}, and Agent uses: {}".format(device, sacAgent.device))
 print("Critic is using cuda: ", next(sacAgent.critic.parameters()).is_cuda)
@@ -291,7 +297,7 @@ vmax        =  1 * args.scaling
 checkPeriod = args.checkPeriod
 
 trainRecords, trainProgress = trainer.learn(
-    env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
+    train_envs, eval_env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
     doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
     checkPeriod=checkPeriod, outFolder=outFolder, storeBest=args.storeBest,
     plotFigure=args.plotFigure, storeFigure=args.storeFigure, 

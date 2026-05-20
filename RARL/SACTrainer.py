@@ -77,29 +77,44 @@ class SACTrainer:
         cnt = 0
         s, info = env.reset()
         while len(self.memory) < self.memory.capacity:
-            cnt += 1
+            cnt += env.num_envs
             print("\rWarmup Buffer [{:d}]".format(cnt), end="")
 
             # Random continuous actions sampled from the action space
             u = env.action_space.sample()   # protagonist
             d = env.action_space.sample()   # adversary
 
-            s_, r, done, _, info = env.step((u, d))
+            input = np.concatenate([u, d], axis=1)
 
-            s_store  = None if done else s_
+       
+
+            s_, r, done, _, info = env.step(input)
+            a_next, _ = self.agent.select_action(s_, explore=True)
+
+            if done.any():
+                print("hold")
+            # s_store  = None if done else s_
+            s_ = np.where(done[:, None], None, s_)
             # Pre-compute the next protagonist action (needed for certain
             # RA-backup variants that use a_ just like the DDQN trainer).
             # if done:
                 # a_next = None
             # else:
-            a_next, _ = self.agent.select_action(s_, explore=True)
+            
 
-            self.store_transition(s, u, d, r, s_store, a_next, info)
+            self.store_transition(s, u, d, r, s_, a_next, info)
 
-            if done:
-                s, info = env.reset()
-            else:
-                s = s_
+            idx = np.flatnonzero(done)
+            for i in idx:
+                obs_i, _ = env.envs[i].reset()
+                s_[i] = obs_i
+                done[i] = False
+            s = s_
+
+            # if done:
+            #     s, info = env.reset()
+            # else:
+            #     s = s_
 
         print(" --- Warmup Buffer Ends")
 
@@ -110,6 +125,7 @@ class SACTrainer:
     def learn(
         self,
         env,
+        eval_env,
         MAX_UPDATES    = 2_000_000,
         MAX_EP_STEPS   = 100,
         warmupQ        = False,
