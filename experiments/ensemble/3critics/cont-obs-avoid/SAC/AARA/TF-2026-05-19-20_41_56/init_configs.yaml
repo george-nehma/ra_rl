@@ -1,6 +1,6 @@
 environment:
   envName: cont-obs-avoid-v0
-  numEnvs: 8
+  numEnvs: 1
   doneType: TF
   costType: max_ell_g
   addObs: false

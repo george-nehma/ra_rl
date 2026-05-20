@@ -43,17 +43,6 @@ from gym_reachability import gym_reachability    # noqa: F401 — registers envs
 
 import argparse
 
-# need callable to return new env instance for each parallel env.
-def make_env(config, device, sample_inside_obs):
-    def _init():
-        return gym.make(
-            env_name,
-            config=config,
-            device=device,
-            sample_inside_obs=sample_inside_obs,
-        )
-    return _init
-
 matplotlib.use('Agg')
 simplefilter(action='ignore', category=FutureWarning)
 timestr = time.strftime("%Y-%m-%d-%H_%M_%S")
@@ -145,21 +134,21 @@ sample_inside_obs = False
 
 # == Environment — passes config=args like updated sim_new_point_mass.py ==
 print("\n== Environment Information ==")
-env = AsyncVectorEnv([make_env(args, device, sample_inside_obs) for _ in range(num_envs)])
+train_envs = gym.make_vec(env_name, num_envs=num_envs, config=args, device=device, sample_inside_obs=sample_inside_obs)
 eval_env = gym.make(
     env_name, config=args, device=device,
     sample_inside_obs=sample_inside_obs
 )
-stateDim    = env.get_attr("state")[0].shape[0]
-actionNum   = env.get_attr("action_space")[0].shape[0]
+stateDim    = eval_env.unwrapped.state.shape[0]
+actionNum   = eval_env.unwrapped.action_space.shape[0]
 action_list = np.arange(actionNum)
 print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, actionNum))
-print(f"Control Range: low = {env.get_attr('action_space')[0].low}, high = {env.get_attr('action_space')[0].high}")
-print(f"Disturbance Range: low = {env.get_attr('disturbance_space')[0].low}, high = {env.get_attr('disturbance_space')[0].high}")
+print(f"Control Range: low = {eval_env.unwrapped.action_space.low}, high = {eval_env.unwrapped.action_space.high}")
+print(f"Disturbance Range: low = {eval_env.unwrapped.disturbance_space.low}, high = {eval_env.unwrapped.disturbance_space.high}")
 
-env.call("set_costParam", args.penalty, args.reward, args.costType, args.scaling)
+train_envs.call("set_costParam", args.penalty, args.reward, args.costType, args.scaling)
 
-env.reset(seed=args.randomSeed)
+train_envs.reset(seed=args.randomSeed)
 eval_env.reset(seed=args.randomSeed)
 
 # == Environment margin plots (unchanged from sim_new_point_mass.py) ==
@@ -273,7 +262,7 @@ if script_args.checkpoint is None:
 # == PROTAGONIST — DDQNEnsemble ==========================================
 # CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
 dimList     = [stateDim] + CONFIG.ARCHITECTURE + [actionNum]
-sacAgent = SAC(CONFIG, dimList=dimList, action_space=env.get_attr("action_space")[0], disturbance_space=env.get_attr("disturbance_space")[0])  
+sacAgent = SAC(CONFIG, dimList=dimList, action_space=eval_env.unwrapped.action_space, disturbance_space=eval_env.unwrapped.disturbance_space)  
 print(sacAgent)
 print("We want to use: {}, and Agent uses: {}".format(device, sacAgent.device))
 print("Critic is using cuda: ", next(sacAgent.critics.parameters()).is_cuda)
@@ -296,7 +285,7 @@ else:
 #     )
 
 # == TRAINER ==
-trainer = SACTrainer(sacAgent, CONFIG, env)
+trainer = SACTrainer(sacAgent, CONFIG, train_envs)
 
 # == TRAINING — Trainer.learn unchanged ==================================eval_
 print("\n== Training Information ==")
@@ -305,7 +294,7 @@ vmax        =  1 * args.scaling
 checkPeriod = args.checkPeriod
 
 trainRecords, trainProgress = trainer.learn(
-    env, eval_env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
+    train_envs, eval_env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
     doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
     checkPeriod=checkPeriod, outFolder=outFolder, storeBest=args.storeBest,
     plotFigure=args.plotFigure, storeFigure=args.storeFigure, 

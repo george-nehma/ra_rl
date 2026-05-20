@@ -361,10 +361,10 @@ class SAC(object):
         max_qf_next_target = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
 
         # Epistemic-uncertainty weight (FIX 3 – use self.CONFIG.TIME_STEP)
-        _lambda  = 0.1 / epistem_uncertainty if epistem_uncertainty is not None else 1.0
-        eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
-
-        # eu_weight = 1
+        # _lambda  = 0.1 / epistem_uncertainty if epistem_uncertainty is not None else 1.0
+        # eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
+        eu_weight = 1
+        
         # Reach-avoid backup
         terminal     = torch.max(l_x, g_x)
         non_terminal = torch.max(g_x, torch.min(l_x, eu_weight * max_qf_next_target))

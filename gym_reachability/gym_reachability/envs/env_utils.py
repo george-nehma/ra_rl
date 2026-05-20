@@ -93,6 +93,44 @@ def calculate_margin_circle(s, c_r, negativeInside=True):
     return margin
   else:
     return -margin
+  
+def intersection_with_rectangle_batch(cx, cy, w, h, px, py):
+    """Ray from rectangle center through each point, intersected with boundary. Batched."""
+    dx = px - cx  # (N,)
+    dy = py - cy  # (N,)
+
+    # t_x, t_y: how far along the ray before hitting each pair of walls
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t_x = np.where(np.abs(dx) > 1e-10, (w / 2) / np.abs(dx), np.inf)
+        t_y = np.where(np.abs(dy) > 1e-10, (h / 2) / np.abs(dy), np.inf)
+
+    t = np.minimum(t_x, t_y)  # first wall hit
+    return cx + t * dx, cy + t * dy  # (N,), (N,)
+
+
+def calculate_margin_rect_batch(positions, x_y_w_h, negativeInside=True):
+    """Batched version of calculate_margin_rect. positions: (N, 2)"""
+    cx, cy, w, h = x_y_w_h
+    px, py = positions[:, 0], positions[:, 1]
+
+    x_r, y_r = intersection_with_rectangle_batch(cx, cy, w, h, px, py)
+
+    dist_boundary = np.sqrt((x_r - cx)**2 + (y_r - cy)**2)  # (N,)
+    dist_point    = np.sqrt((px  - cx)**2 + (py  - cy)**2)  # (N,)
+
+    inside = (px >= cx - w/2) & (px <= cx + w/2) & (py >= cy - h/2) & (py <= cy + h/2)
+    margin = np.where(inside, -dist_boundary - dist_point,
+                               -dist_boundary + dist_point)  # (N,)
+
+    return margin if negativeInside else -margin
+
+
+def calculate_margin_circle_batch(positions, c_r, negativeInside=True):
+    """Batched version of calculate_margin_circle. positions: (N, 2)"""
+    center, radius = c_r
+    dist = np.linalg.norm(positions - center, axis=1)  # (N,)
+    margin = dist - radius
+    return margin if negativeInside else -margin
 
 
 # == Plotting ==

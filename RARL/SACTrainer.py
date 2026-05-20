@@ -212,7 +212,7 @@ class SACTrainer:
             # ---- environment step ----------------------------------
             input = np.concatenate([u,d], axis=1)
             s_, r, done, _, info = env.step(input)
-            info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
+            # info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
             epCost += r
             step_num += 1
             # terminal_step = done or (step_num == MAX_EP_STEPS - 1)
@@ -340,11 +340,8 @@ class SACTrainer:
                 )
 
             if (done.any() and doneTerminate) or step_num.any() >= MAX_EP_STEPS:
-                print(env.get_attr("state"))
-                reset_obs, _ = env.reset()   # shape: (num_envs, obs_dim) NOTE: this will reset the obstacles (okay for now as the seed=0)
-                print(env.get_attr("state")) # reset only the environments that are done
-                
-                s_ = np.where(done[:, None], reset_obs, s_)
+                # for i in np.where(done)[0]:
+                    # s_[i], _ = env.envs[i].reset()
                 ep     += 1
                 epCost = np.where(done, 0.0, epCost)
                 step_num = np.where(done, 0, step_num)
