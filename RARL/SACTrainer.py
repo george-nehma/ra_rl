@@ -86,7 +86,8 @@ class SACTrainer:
 
             s_, r, done, _, info = env.step((u, d))
 
-            s_store  = None if done else s_
+            # s_store  = None if done else s_
+
             # Pre-compute the next protagonist action (needed for certain
             # RA-backup variants that use a_ just like the DDQN trainer).
             # if done:
@@ -94,7 +95,7 @@ class SACTrainer:
             # else:
             a_next, _ = self.agent.select_action(s_, explore=True)
 
-            self.store_transition(s, u, d, r, s_store, a_next, info)
+            self.store_transition(s, u, d, r, s_, a_next, done, info)
 
             if done:
                 s, info = env.reset()
@@ -214,13 +215,13 @@ class SACTrainer:
                 s_, r, done, _, info = env.step((u, d))
                 epCost += r
 
-                terminal_step = done or (step_num == MAX_EP_STEPS - 1)
-                s_store  = None if terminal_step else s_
+                # terminal_step = done or (step_num == MAX_EP_STEPS - 1)
+                # s_store  = None if terminal_step else s_
                 # a_next   = None
                 # if not terminal_step:
                 a_next, _ = self.agent.select_action(s_, explore=True)
 
-                self.store_transition(s, u, d, r, s_store, a_next, info)
+                self.store_transition(s, u, d, r, s_, a_next, done, info)
                 s = s_
 
                 # ---- periodic evaluation --------------------------------

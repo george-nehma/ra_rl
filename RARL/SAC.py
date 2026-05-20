@@ -29,7 +29,7 @@ from .model import GaussianPolicy, QNetwork, DeterministicPolicy, StepLRMargin, 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from collections import namedtuple
-Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "info"])
+Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "done", "info"])
 
 # ---------------------------------------------------------------------------
 # MeanEnsembleNet
@@ -390,7 +390,7 @@ class SAC(object):
     #         plt.show()
     #     plt.close(fig)
 
-    def critic_update(self, critic, critic_optim, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, ep_unc=None):
+    def critic_update(self, critic, critic_optim, state, action, disturbance, state_nxt, done, l_x, g_x, ep_unc=None):
 
         # ----------------------------------------------------------------
         # 1.  Critic update (reach-avoid Bellman target)
@@ -402,11 +402,11 @@ class SAC(object):
         max_qf_next_target = torch.zeros(self.BATCH_SIZE).to(self.device)
 
         with torch.no_grad():
-            next_action, next_log_pi_a, _ = self.protagonist.sample(non_final_state_nxt)
-            next_disturb, next_log_pi_d, _ = self.adversary.sample(non_final_state_nxt)
-            qf1_next, qf2_next = self.critic_target(non_final_state_nxt, next_action, next_disturb)
+            next_action, next_log_pi_a, _ = self.protagonist.sample(state_nxt)
+            next_disturb, next_log_pi_d, _ = self.adversary.sample(state_nxt)
+            qf1_next, qf2_next = self.critic_target(state_nxt, next_action, next_disturb)
             # protagonist minimises → take the minimum of the two Q-heads
-        max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
+        max_qf_next_target = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
 
         # Epistemic-uncertainty weight (FIX 3 – use self.CONFIG.TIME_STEP)
         _lambda  = 0.1 / ep_unc if ep_unc is not None else 1.0
@@ -417,15 +417,12 @@ class SAC(object):
         # eu_weight = 1
         # Reach-avoid backup
         terminal     = torch.max(l_x, g_x)
-        non_terminal = torch.max(g_x[non_final_mask],
-            torch.min(l_x[non_final_mask], eu_weight * max_qf_next_target[non_final_mask]))
+        non_terminal = torch.max(g_x, torch.min(l_x, eu_weight * max_qf_next_target))
 
         next_q_value = torch.zeros(self.BATCH_SIZE).float().to(self.device)
-        final_mask = torch.logical_not(non_final_mask)
-        next_q_value[non_final_mask] = (
-            (1 - self.GAMMA) * terminal[non_final_mask] + self.GAMMA * non_terminal
-        )
-        next_q_value[final_mask] = terminal[final_mask]
+        # final_mask = torch.logical_not(non_final_mask)
+        next_q_value = ((1 - self.GAMMA) * terminal + (~done) * self.GAMMA * non_terminal)
+        # next_q_value[final_mask] = terminal[final_mask]
 
         qf1_loss = 0 * F.l1_loss(qf1, next_q_value.unsqueeze(-1).detach()) + F.mse_loss(qf1, next_q_value.unsqueeze(-1).detach())
         qf2_loss = 0 * F.l1_loss(qf2, next_q_value.unsqueeze(-1).detach()) + F.mse_loss(qf2, next_q_value.unsqueeze(-1).detach())
@@ -466,13 +463,13 @@ class SAC(object):
             batch = Transition(*zip(*transitions))
 
         (
-            non_final_mask,
-            non_final_state_nxt,
+            state_nxt,
             state,
             action,
             action_next,
             disturbance,
             _,
+            done,
             g_x,
             l_x,
         ) = self.unpack_batch(batch)
@@ -481,7 +478,7 @@ class SAC(object):
 
 
         futures = {
-            self._executor.submit(self.critic_update, c, c_opt, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, epistem_uncertainty): c
+            self._executor.submit(self.critic_update, c, c_opt, state, action, disturbance, state_nxt, done, l_x, g_x, epistem_uncertainty): c
             for c, c_opt in zip(self.critics, self.critic_optimisers)
         }
         losses = []
@@ -652,23 +649,25 @@ class SAC(object):
             (non_final_mask, non_final_state_nxt, state, action,
              reward, g_x, l_x)
         """
-        non_final_mask = torch.tensor(
-            tuple(map(lambda s: s is not None, batch.s_)), dtype=torch.bool
-        ).to(self.device)
+        # non_final_mask = torch.tensor(
+        #     tuple(map(lambda s: s is not None, batch.s_)), dtype=torch.bool
+        # ).to(self.device)
 
         state = torch.FloatTensor(np.array(batch.s)).to(self.device)
         action = torch.FloatTensor(np.array(batch.a)).to(self.device)
         action_next = torch.FloatTensor(np.array(batch.a_)).to(self.device)
         disturbance = torch.FloatTensor(np.array(batch.d)).to(self.device)
-        non_final_states = [s for s in batch.s_ if s is not None]
-        non_final_state_nxt = (
-            torch.from_numpy(np.vstack(non_final_states)).float().to(self.device)
-            if non_final_states
-            else torch.zeros(0, state.shape[1], device=self.device)
-        )
+        state_nxt = torch.FloatTensor(np.array(batch.s_)).to(self.device)
+        done = torch.tensor(np.array(batch.done), dtype=torch.bool).to(self.device)
+        # non_final_states = [s for s in batch.s_ if s is not None]
+        # non_final_state_nxt = (
+        #     torch.from_numpy(np.vstack(non_final_states)).float().to(self.device)
+        #     if non_final_states
+        #     else torch.zeros(0, state.shape[1], device=self.device)
+        # )
 
         reward = torch.FloatTensor(np.array(batch.r)).to(self.device)
         g_x    = torch.FloatTensor([i["g_x"] for i in batch.info]).to(self.device).view(-1)
         l_x    = torch.FloatTensor([i["l_x"] for i in batch.info]).to(self.device).view(-1)
 
-        return non_final_mask, non_final_state_nxt, state, action, action_next, disturbance, reward, g_x, l_x
+        return state_nxt, state, action, action_next, disturbance, reward, done, g_x, l_x
