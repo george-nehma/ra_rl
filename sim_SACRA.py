@@ -137,6 +137,11 @@ train_envs = gym.make_vec(
     env_name, num_envs=num_envs, config=args, device=device,
     sample_inside_obs=sample_inside_obs
 )
+# train_envs = gym.vector.SyncVectorEnv(
+#     [lambda: gym.make(env_name, config=args, device=device,
+#     sample_inside_obs=sample_inside_obs) for _ in range(num_envs)],
+#     autoreset_mode=gym.vector.AutoresetMode.SAME_STEP
+# )
 eval_env = gym.make(
     env_name, config=args, device=device,
     sample_inside_obs=sample_inside_obs

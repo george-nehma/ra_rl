@@ -76,6 +76,7 @@ class SACTrainer:
         """
         cnt = 0
         s, info = env.reset()
+        episode_start = np.zeros(env.num_envs, dtype=bool)
         while len(self.memory) < self.memory.capacity:
             cnt += env.num_envs
             print("\rWarmup Buffer [{:d}]".format(cnt), end="")
@@ -86,33 +87,28 @@ class SACTrainer:
 
             input = np.concatenate([u, d], axis=1)
 
-       
-
             s_, r, done, _, info = env.step(input)
             a_next, _ = self.agent.select_action(s_, explore=True)
 
-            if done.any():
-                print("hold")
-            # s_store  = None if done else s_
             s_ = np.where(done[:, None], None, s_)
+
+            if done.any():
+                self.store_transition(s[~episode_start], u[~episode_start], d[~episode_start], r[~episode_start], s_[~episode_start], a_next[~episode_start], {k: v[~episode_start] for k, v in info.items()})
+            else:
+                self.store_transition(s, u, d, r, s_, a_next, info)
+            # s_store  = None if done else s_
+            
             # Pre-compute the next protagonist action (needed for certain
             # RA-backup variants that use a_ just like the DDQN trainer).
             # if done:
                 # a_next = None
             # else:
             
-
-            self.store_transition(s, u, d, r, s_, a_next, info)
-
-            idx = np.flatnonzero(done)
-            for i in idx:
-                obs_i, _ = env.envs[i].reset()
-                s_[i] = obs_i
-                done[i] = False
+            episode_start = done
             s = s_
 
-            # if done:
-            #     s, info = env.reset()
+            # if done.any():
+            #     s, info = env.reset(options={"reset_mask": done})
             # else:
             #     s = s_
 

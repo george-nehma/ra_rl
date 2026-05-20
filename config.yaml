@@ -3,7 +3,7 @@
 # Environment parameters
 environment:
   envName: "cont-obs-avoid-v0"
-  numEnvs: 5
+  numEnvs: 8
   doneType: "TF" # toThreshold
   costType: "max_ell_g"
   addObs: False
