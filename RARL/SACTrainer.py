@@ -76,9 +76,10 @@ class SACTrainer:
         """
         cnt = 0
         s, info = env.reset()
+        episode_start = np.zeros(env.num_envs, dtype=bool)
         while len(self.memory) < self.memory.capacity:
-            cnt += env.num_envs
-            print("\rWarmup Buffer [{:d}]".format(cnt), end="")
+            # cnt += env.num_envs
+            print("\rWarmup Buffer [{:d}]".format(len(self.memory)+1), end="")
 
             # Random continuous actions sampled from the action space
             u = env.action_space.sample()   # protagonist
@@ -89,14 +90,14 @@ class SACTrainer:
             s_, r, done, _, info = env.step(input)
             a_next, _ = self.agent.select_action(s_, explore=True)
             info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
+            s_ = np.where(done[:, None], None, s_)
 
-            self.store_transition(s, u, d, r, s_, a_next, done, info)
+            if episode_start.any():
+                self.store_transition(s[~episode_start], u[~episode_start], d[~episode_start], r[~episode_start], s_[~episode_start], a_next[~episode_start], done[~episode_start], {k: v[~episode_start] for k, v in info.items()})
+            else:
+                self.store_transition(s, u, d, r, s_, a_next, done, info)
 
-            # reset ONLY environments that are done
-            if np.any(done):
-                reset_obs, _ = env.reset()   # shape: (num_envs, obs_dim)
-
-                s_ = np.where(done[:, None], reset_obs, s_)
+            episode_start = done
             s = s_
         print(" --- Warmup Buffer Ends")
 
@@ -201,6 +202,7 @@ class SACTrainer:
         step_num = np.zeros(env.num_envs, dtype=int)
         epCost  = np.zeros(env.num_envs, dtype=np.float64)
         ep += env.num_envs
+        episode_start = np.zeros(env.num_envs, dtype=bool)
         while cntUpdate <= MAX_UPDATES:
             
             
@@ -211,17 +213,25 @@ class SACTrainer:
 
             # ---- environment step ----------------------------------
             input = np.concatenate([u,d], axis=1)
-            s_, r, done, _, info = env.step(input)
-            # info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
+            s_, r, terminated, truncated, info = env.step(input)
+            a_next, _ = self.agent.select_action(s_, explore=True)
+            s_ = np.where(terminated[:, None], None, s_)
+            info = {k: v for k, v in info.items() if not k.startswith('_')} # cleaning info from vectorised env
+
             epCost += r
             step_num += 1
             # terminal_step = done or (step_num == MAX_EP_STEPS - 1)
             # s_store  = None if terminal_step else s_
             # a_next   = None
             # if not terminal_step:
-            a_next, _ = self.agent.select_action(s_, explore=True)
-
-            self.store_transition(s, u, d, r, s_, a_next, done, info)
+            
+            if episode_start.any():
+                self.store_transition(s[~episode_start], u[~episode_start], d[~episode_start], r[~episode_start], s_[~episode_start], a_next[~episode_start], terminated[~episode_start], {k: v[~episode_start] for k, v in info.items()})
+                ep     += 1
+                epCost = np.where(episode_start, 0.0, epCost)
+                step_num = np.where(episode_start, 0, step_num)
+            else:
+                self.store_transition(s, u, d, r, s_, a_next, terminated, info)
 
             # ---- periodic evaluation --------------------------------
             if cntUpdate != 0 and cntUpdate % checkPeriod == 0:
@@ -339,12 +349,7 @@ class SACTrainer:
                     end="",
                 )
 
-            if (done.any() and doneTerminate) or step_num.any() >= MAX_EP_STEPS:
-                # for i in np.where(done)[0]:
-                    # s_[i], _ = env.envs[i].reset()
-                ep     += 1
-                epCost = np.where(done, 0.0, epCost)
-                step_num = np.where(done, 0, step_num)
+            episode_start = np.logical_or(terminated, truncated)
             s = s_
 
             # ---- early stopping ----------------------------------------

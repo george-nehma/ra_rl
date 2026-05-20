@@ -134,9 +134,9 @@ sample_inside_obs = False
 
 # == Environment — passes config=args like updated sim_new_point_mass.py ==
 print("\n== Environment Information ==")
-train_envs = gym.make_vec(env_name, num_envs=num_envs, config=args, device=device, sample_inside_obs=sample_inside_obs)
+train_envs = gym.make_vec(env_name, num_envs=num_envs, max_episode_steps=args.maxSteps, config=args, device=device, sample_inside_obs=sample_inside_obs)
 eval_env = gym.make(
-    env_name, config=args, device=device,
+    env_name, max_episode_steps=args.maxSteps, config=args, device=device,
     sample_inside_obs=sample_inside_obs
 )
 stateDim    = eval_env.unwrapped.state.shape[0]

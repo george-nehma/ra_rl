@@ -14,13 +14,13 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def _run_one(args):
-    env, sacAgent, x, y, T, toEnd = args
-    state = np.concatenate([np.array([x, y, 0, 0]), env.obs_list])
-    state_traj, result, traj_val, control_traj = env.simulate_one_trajectory(
-        sacAgent, T=T, state=state, toEnd=toEnd
-    )
-    return state_traj, result, traj_val, control_traj
+# def _run_one(args):
+#     env, sacAgent, x, y, T, toEnd = args
+#     state = np.concatenate([np.array([x, y, 0, 0]), env.obs_list])
+#     state_traj, result, traj_val, control_traj = env.simulate_one_trajectory(
+#         sacAgent, T=T, state=state, toEnd=toEnd
+#     )
+#     return state_traj, result, traj_val, control_traj
 
 class ContinuousObsAvoidEnv(gym.Env):
     
@@ -52,7 +52,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         self.sample_inside_obs = sample_inside_obs
 
         # Time-step Parameters.
-        self.time_step = self.config.timeStep   
+        self.time_step = self.config.timeStep
 
         # Define target set parameters 
         self.target_x_y_w_h = np.array([[1.44, 7.5, 1.5, 1.5]])
@@ -439,7 +439,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         # = `info`
         info = {"g_x": g_x, "l_x": l_x}
 
-        truncated = False # don't use truncated but added for Gym API
+        truncated = False # handled by TimeLimit wrapper
 
         return np.asarray(self.state, dtype=np.float32), cost, done, truncated, info
 
