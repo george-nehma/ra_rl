@@ -134,16 +134,12 @@ sample_inside_obs = False
 # == Environment — passes config=args like updated sim_new_point_mass.py ==
 print("\n== Environment Information ==")
 train_envs = gym.make_vec(
-    env_name, num_envs=num_envs, config=args, device=device,
-    sample_inside_obs=sample_inside_obs
+    env_name, num_envs=num_envs, max_episode_steps=args.maxSteps,
+    config=args, device=device, sample_inside_obs=sample_inside_obs
 )
-# train_envs = gym.vector.SyncVectorEnv(
-#     [lambda: gym.make(env_name, config=args, device=device,
-#     sample_inside_obs=sample_inside_obs) for _ in range(num_envs)],
-#     autoreset_mode=gym.vector.AutoresetMode.SAME_STEP
-# )
+
 eval_env = gym.make(
-    env_name, config=args, device=device,
+    env_name, max_episode_steps=args.maxSteps, config=args, device=device,
     sample_inside_obs=sample_inside_obs
 )
 
@@ -154,6 +150,7 @@ print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, acti
 print(f"Control Range: low = {eval_env.unwrapped.action_space.low}, high = {eval_env.unwrapped.action_space.high}")
 print(f"Disturbance Range: low = {eval_env.unwrapped.disturbance_space.low}, high = {eval_env.unwrapped.disturbance_space.high}")
 
+train_envs.call("set_costParam", args.penalty, args.reward, args.costType, args.scaling)
 eval_env.unwrapped.set_costParam(args.penalty, args.reward, args.costType, args.scaling)
 
 train_envs.reset(seed=args.randomSeed)
@@ -293,7 +290,7 @@ else:
 #     )
 
 # == TRAINER ==
-trainer = SACTrainer(sacAgent, CONFIG)
+trainer = SACTrainer(sacAgent, CONFIG, train_envs)
 
 # == TRAINING — Trainer.learn unchanged ==================================
 print("\n== Training Information ==")
@@ -324,27 +321,28 @@ if plotFigure or storeFigure:
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     ax = axes[0]
     ax.plot(trainRecords[:,0], 'b:')
-    ax.set_xlabel('Iteration (x 1e5)', fontsize=18)
-    ax.set_xticks(np.linspace(0, args.maxUpdates, 5))
-    ax.set_xticklabels(np.linspace(0, args.maxUpdates, 5) / 1e5)
+    ax.set_xlabel('Iteration (x 1e6)', fontsize=18)
+    ax.set_xticks(np.linspace(0, args.maxUpdates/args.numEnvs, 5))
+    ax.set_xticklabels(np.linspace(0, args.maxUpdates/args.numEnvs, 5)*args.numEnvs / 1e6)
     ax.set_title('loss_critic', fontsize=18)
-    ax.set_xlim(left=0, right=args.maxUpdates)
+    ax.set_xlim(left=0, right=args.maxUpdates/args.numEnvs)
 
     ax = axes[1]
-    ax.plot(trainRecords[:,1], 'r')
-    ax.set_xlabel('Iteration (x 1e5)', fontsize=18)
-    ax.set_xticks(np.linspace(0, args.maxUpdates, 5))
-    ax.set_xticklabels(np.linspace(0, args.maxUpdates, 5) / 1e5)
+    ax.plot(trainRecords[:,5], 'r')
+    ax.set_xlabel('Iteration (x 1e6)', fontsize=18)
+    ax.set_xticks(np.linspace(0, args.maxUpdates/args.numEnvs, 5))
+    ax.set_xticklabels(np.linspace(0, args.maxUpdates/args.numEnvs, 5)*args.numEnvs / 1e6)
     ax.set_title('Epistemic Uncertainty', fontsize=18)
-    ax.set_xlim(left=0, right=args.maxUpdates)
+    ax.set_xlim(left=0, right=args.maxUpdates/args.numEnvs)
 
-    data = trainProgress[:, 0]
+    data = trainProgress[:, 0]* 100
     ax   = axes[2]
     x    = np.arange(data.shape[0]) + 1
     ax.plot(x, data, 'b-o')
-    ax.set_xlabel('Index', fontsize=18)
-    ax.set_xticks(x)
+    ax.set_xlabel('Eval period (x 5e5)', fontsize=18)
+    ax.set_xticks(np.linspace(0,len(x), 5))
     ax.set_title('Success Rate', fontsize=18)
+    ax.set_ylim(0,100)
     ax.set_xlim(left=1, right=data.shape[0])
     fig.tight_layout()
     if storeFigure:
@@ -362,12 +360,20 @@ if plotFigure or storeFigure:
     sacAgent.load_checkpoint(idx * args.checkPeriod, outFolder, evaluate=True)
 
     # -- grid rollout eval (identical to sim_new_point_mass.py) -----------
-    nx = 41
+    nx = 41 
     ny = 121
-    na = env.unwrapped.action_space.shape[0]
-    nd = env.unwrapped.disturbance_space.shape[0]
-    xs = np.linspace(env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx)
-    ys = np.linspace(env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny)
+    xs = np.linspace(eval_env.unwrapped.bounds[0, 0], eval_env.unwrapped.bounds[0, 1], nx)
+    ys = np.linspace(eval_env.unwrapped.bounds[1, 0], eval_env.unwrapped.bounds[1, 1], ny)
+    na = eval_env.unwrapped.action_space.shape[0]
+    nd = eval_env.unwrapped.disturbance_space.shape[0]
+
+    N = nx * ny
+    states = np.array([
+                np.concatenate([np.array([xs[i], ys[j], 0, 0]), eval_env.unwrapped.obs_list])
+                for i in range(nx) for j in range(ny)
+            ])
+
+    state_hist, results, values, control_hist = eval_env.unwrapped.simulate_all_trajectories(sacAgent, states, N, T=250, toEnd=False)
 
     resultMtx      = np.empty((nx, ny), dtype=int)
     actDistMtx     = np.empty((nx, ny, na), dtype=float)
@@ -376,49 +382,28 @@ if plotFigure or storeFigure:
     varMtx         = np.empty((nx, ny))
     disAgreeMtx    = np.empty((nx, ny))
 
-    analytic_max_fail = 0
-    analytic_min_fail = 0
+    stateTensor  = torch.FloatTensor(states).to(device).unsqueeze(0)
 
-    it = np.nditer(resultMtx, flags=['multi_index'])
-    while not it.finished:
-        idx_cell = it.multi_index
-        print(idx_cell, end='\r')
-        x, y  = xs[idx_cell[0]], ys[idx_cell[1]]
-        state = np.concatenate([np.array([x, y, 0, 0]), env.unwrapped.obs_list])
+    _, _, action = sacAgent.protagonist.sample(stateTensor)
+    _, _, disturbance = sacAgent.adversary.sample(stateTensor)
 
-        stateTensor  = torch.FloatTensor(state).to(device).unsqueeze(0)
-        _, _, action = sacAgent.protagonist.sample(stateTensor)
-        _, _, disturbance = sacAgent.adversary.sample(stateTensor)
+    actDistMtx = action.cpu().detach().numpy().reshape(nx, ny, na)
+    disturbDistMtx = disturbance.cpu().detach().numpy().reshape(nx, ny, nd)
 
-        actDistMtx    [idx_cell] = action.cpu().detach().numpy()
-        disturbDistMtx[idx_cell] = disturbance.cpu().detach().numpy()
+    unc = sacAgent.get_uncertainty(stateTensor.squeeze(0), action.squeeze(0), disturbance.squeeze(0))
+    varMtx = unc["epistemic_uncertainty"].cpu().detach().numpy().reshape(nx, ny)
+    disAgreeMtx = unc["safe_disagreement"].cpu().detach().numpy().reshape(nx,ny)
 
-        # ADDED: epistemic uncertainty at this state
-        unc = sacAgent.get_uncertainty(stateTensor, action, disturbance)
-        varMtx    [idx_cell] = unc["epistemic_uncertainty"].item()
-        disAgreeMtx[idx_cell] = unc["safe_disagreement"].item()
+    g_x_val = eval_env.unwrapped.safety_margin_batch(states[:,:2])
+    analytic_max_fail = (g_x_val > 0).sum()
 
-        _, result, _, _ = env.unwrapped.simulate_one_trajectory(
-            sacAgent, T=250, state=state
-        )
+    resultMtx = results.reshape(nx, ny)
 
-        g_x_val         = env.unwrapped.safety_margin(state)
-        # inside_max_diag = env.unwrapped.is_inside_diagonal_region(state)
-        # inside_min_diag = env.unwrapped.is_inside_diagonal_region(state, min=True)
-        if g_x_val > 0:
-            analytic_min_fail += 1
-            analytic_max_fail += 1
-        # else:
-        #     if inside_max_diag: analytic_max_fail += 1
-        #     if inside_min_diag: analytic_min_fail += 1
-
-        resultMtx[idx_cell] = result
-        it.iternext()
 
     print('Analytical Success Rate for Maximal Disturbances-{:.3f}'.format(
         1 - analytic_max_fail / (nx * ny)))
-    print('Analytical Success Rate for No Disturbances-{:.3f}'.format(
-        1 - analytic_min_fail / (nx * ny)))
+    # print('Analytical Success Rate for No Disturbances-{:.3f}'.format(
+    #     1 - analytic_min_fail / (nx * ny)))
     print('Best RA Success Rate with Adversarial Disturbances-{:.3f}'.format(
         (resultMtx == 1).sum() / (nx * ny)))
 
@@ -428,12 +413,15 @@ if plotFigure or storeFigure:
         disturbDistMtx=disturbDistMtx, figureFolder=figureFolder,
         plotFigure=plotFigure, storeFigure=storeFigure, actionNum=actionNum,
     )
-    plot_RA_eval(env, sacAgent, cfg)
+
+    eval_env.unwrapped.visualize(sacAgent, vmin=vmin, vmax=vmax, nx=nx, ny=ny)
+
+    plot_RA_eval(eval_env, sacAgent, cfg)
     # plot_protagonist_adversary_actions(env, cfg)
 
     # -- ADDED: 4-panel epistemic uncertainty figure ----------------------
     sacAgent.plot_uncertainty_maps(
-        env,
+        eval_env,
         out_folder=figureFolder,
         nx=41, ny=ny,
         vmin=vmin, vmax=vmax,
@@ -442,7 +430,7 @@ if plotFigure or storeFigure:
     )
 
     # -- ADDED: uncertainty overlay on rollout grid -----------------------
-    axStyle = env.unwrapped.get_axes()
+    axStyle = eval_env.unwrapped.get_axes()
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
 
     ax = axes[0]
@@ -452,9 +440,8 @@ if plotFigure or storeFigure:
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
     ax.set_title(r'Epistemic Uncertainty  Var$_k[Q]$', fontsize=14)
-    env.unwrapped.plot_target_failure_set(ax=ax)
-    # env.unwrapped.plot_reach_avoid_set(ax=ax)
-    env.unwrapped.plot_formatting(ax=ax)
+    eval_env.unwrapped.plot_target_failure_set(ax=ax)
+    eval_env.unwrapped.plot_formatting(ax=ax)
 
     ax = axes[1]
     im = ax.imshow(
@@ -463,9 +450,8 @@ if plotFigure or storeFigure:
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
     ax.set_title('Safe / Unsafe Disagreement', fontsize=14)
-    env.unwrapped.plot_target_failure_set(ax=ax)
-    # env.unwrapped.plot_reach_avoid_set(ax=ax)
-    env.unwrapped.plot_formatting(ax=ax)
+    eval_env.unwrapped.plot_target_failure_set(ax=ax)
+    eval_env.unwrapped.plot_formatting(ax=ax)
 
     fig.suptitle(
         f"Protagonist Ensemble ({args.numCritics} critics | mode={args.mode})",
@@ -486,12 +472,5 @@ if plotFigure or storeFigure:
     trainDict['varMtx']         = varMtx         # ADDED
     trainDict['disAgreeMtx']    = disAgreeMtx    # ADDED
     trainDict['numCritics']     = args.numCritics # ADDED
-
-# Save uncertainty metrics pickle alongside the main train dict
-# protagonist.save_metrics(
-#     {'varMtx': varMtx if (plotFigure or storeFigure) else None,
-#      'disAgreeMtx': disAgreeMtx if (plotFigure or storeFigure) else None},
-#     out_folder=outFolder, tag='_final',
-# )
 
 save_obj(trainDict, filePath)

@@ -1,30 +1,24 @@
-# == CONFIG ==
-
-# Environment parameters
 environment:
-  envName: "cont-obs-avoid-v0"
+  envName: cont-obs-avoid-v0
   numEnvs: 8
-  doneType: "TF" # toThreshold
-  costType: "max_ell_g"
-  addObs: False
+  doneType: TF
+  costType: max_ell_g
+  addObs: false
   randomSeed: 0
   reward: -1.0
   penalty: 1.0
   scaling: 4.0
   timeStep: 0.05
   maxSteps: 300
-
-
-# Training scheme
 training:
   warmup: true
   warmupIter: 2000
   maxUpdates: 2000000
   updateTimes: 10
-  updatePeriodEps: 5.0e+5
-  updatePeriodGamma: 2.5e+5
-  updatePeriodLr: 5.0e+5
-  memoryCapacity: 50000 
+  updatePeriodEps: 500000.0
+  updatePeriodGamma: 250000.0
+  updatePeriodLr: 500000.0
+  memoryCapacity: 200000
   checkPeriod: 50000
   batchSize: 2048
   maxModel: 100
@@ -35,15 +29,15 @@ training:
   double: true
   plotTrainValue: true
   alpha: 0.185
-  policy: "Gaussian"
+  policy: Gaussian
   targetUpdateInterval: 1
   autoAlphaTuning: true
-
-
-# NN hyper-parameters
 network:
   annealing: true
-  architecture: [2048, 2048]
+  architecture:
+  - 256
+  - 256
+  - 256
   learningRate: 0.001
   learningRateActor: 0.001
   learningRateDecay: 0.8
@@ -52,31 +46,20 @@ network:
   eps: 0.5
   epsEnd: 0.05
   epsDecay: 0.7
-  actType: "Tanh"
+  actType: Tanh
   numCritics: 3
-
-# RL type
 rl:
-  mode: "AARA"
-  terminalType: "max"
-
-# File
+  mode: AARA
+  terminalType: max
 file:
   showTime: true
-  name: ""
-  outFolder: "experiments"
+  name: ''
+  outFolder: experiments
   plotFigure: false
   storeFigure: true
   storeBest: false
-  
-
-# Adversary parameters
 adversary:
-  # for the function select_action() in DDQNSingle.py
   selectWorstQ: false
-  # for the find_worst_d() function in zermelo_show.py
   findMaxQ: true
-  # for the simulate_one_trajectory() function in zermelo_show.py (eval)
   simMaxQ: true
-  # for the final test (of each point in the env) in sim_new_point_mass.py
   testMaxQ: true

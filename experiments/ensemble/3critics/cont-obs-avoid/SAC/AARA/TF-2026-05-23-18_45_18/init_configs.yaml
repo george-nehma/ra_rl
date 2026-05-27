@@ -1,6 +1,6 @@
 environment:
   envName: cont-obs-avoid-v0
-  numEnvs: 5
+  numEnvs: 8
   doneType: TF
   costType: max_ell_g
   addObs: false
@@ -13,7 +13,7 @@ environment:
 training:
   warmup: true
   warmupIter: 2000
-  maxUpdates: 2000000
+  maxUpdates: 3000000
   updateTimes: 10
   updatePeriodEps: 500000.0
   updatePeriodGamma: 250000.0
@@ -35,8 +35,8 @@ training:
 network:
   annealing: true
   architecture:
-  - 512
-  - 512
+  - 2048
+  - 2048
   learningRate: 0.001
   learningRateActor: 0.001
   learningRateDecay: 0.8

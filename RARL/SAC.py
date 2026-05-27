@@ -27,15 +27,16 @@ import torch.optim as optim
 from .utils import soft_update, hard_update, save_model
 from .model import GaussianPolicy, QNetwork, DeterministicPolicy, StepLRMargin, StepResetLR
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import matplotlib.pyplot as plt
 
 from collections import namedtuple
-Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "info"])
+Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "done", "info"])
 
 # ---------------------------------------------------------------------------
 # MeanEnsembleNet
 # ---------------------------------------------------------------------------
 
-class MeanEnsembleNet(nn.Module):
+class MaxEnsembleNet(nn.Module):
     """
     Wraps N networks; forward(x) returns their mean output.
 
@@ -53,7 +54,7 @@ class MeanEnsembleNet(nn.Module):
         for net in self.networks:
             q1, q2 = net(x, u, d)
             qs.append(torch.max(q1, q2))
-        return torch.stack(qs, dim=0).mean(dim=0)
+        return torch.max(torch.stack(qs, dim=0), dim=0).values
 
     def stack(self, x, u, d: torch.Tensor) -> torch.Tensor:
         """(K, B, A) — raw per-critic outputs, no averaging."""
@@ -152,8 +153,7 @@ class SAC(object):
         self._executor = ThreadPoolExecutor(max_workers=self.n_workers)
 
         # Unified inference modules — what Trainer / env see as Q_network
-        self.Q_network = MeanEnsembleNet([c for c in self.critics])
-        self.Q_target  = MeanEnsembleNet([c for c in self.critic_targets])
+        self.Q_network = MaxEnsembleNet([c for c in self.critics])
 
         # Discount factor: anneal to one
         self.GAMMA      = config.GAMMA 
@@ -179,13 +179,13 @@ class SAC(object):
         self.adversary       = PolicyCls(config, dimList, disturbance_space.shape[0], disturbance_space, conditioned_sigma=True).to(self.device)
         self.adversary_optim = optim.AdamW(self.adversary.parameters(), lr=config.LR_A, weight_decay=1e-3)
 
-        # self.protagonist_scheduler = optim.lr_scheduler.StepLR(
-        #     self.protagonist_optim, step_size=self.LR_A_PERIOD, gamma=self.LR_A_DECAY
-        # )
+        self.protagonist_scheduler = optim.lr_scheduler.StepLR(
+            self.protagonist_optim, step_size=self.LR_A_PERIOD, gamma=self.LR_A_DECAY
+        )
 
-        # self.adversary_scheduler = optim.lr_scheduler.StepLR(
-        #     self.adversary_optim, step_size=self.LR_A_PERIOD, gamma=self.LR_A_DECAY
-        # )
+        self.adversary_scheduler = optim.lr_scheduler.StepLR(
+            self.adversary_optim, step_size=self.LR_A_PERIOD, gamma=self.LR_A_DECAY
+        )
 
         self.prev_pro_loss = 0.0
         self.prev_adv_loss = 0.0
@@ -268,15 +268,15 @@ class SAC(object):
         q_stack = self.Q_network.stack(state_tensor, control, disturbance)   # (K, B, A)
 
         mean_q = q_stack.mean(dim=0)
-        # var_q  = q_stack.var(dim=0, unbiased=True)
+        var_q  = q_stack.var(dim=0, unbiased=True)
         std_q  = q_stack.std(dim=0, unbiased=True)
         min_q  = q_stack.min(dim=0).values
 
         # Biased variance — 1/M * sum(Q^2) - (1/M * sum(Q))^2
-        var_q = q_stack.var(dim=0, unbiased=False)    # (B, A) — per state per action
+        epistemic_uncertainty = q_stack.var(dim=0, unbiased=False)    # (B, A) — per state per action
 
         # Average variance across action dimension → scalar per state
-        epistemic_uncertainty = var_q.mean(dim=-1)     # (B,)
+        # epistemic_uncertainty = var_q.mean(dim=-1)     # (B,)
 
         # Safe/unsafe disagreement on the min-action decision
         # In RA-RL: min_a Q(s,a) < 0 means the state is believed safe
@@ -297,98 +297,99 @@ class SAC(object):
             safe_disagreement     = safe_disagreement,
         )
 
-    # @torch.no_grad()
-    # def get_uncertainty_map(self, env, nx: int = 41, ny: int = 41) -> dict:
-    #     """
-    #     Sweep the 2-D state grid and compute uncertainty at every cell.
+    @torch.no_grad()
+    def get_uncertainty_map(self, env, nx: int = 41, ny: int = 41) -> dict:
+        """
+        Sweep the 2-D state grid and compute uncertainty at every cell.
 
-    #     Returns dict of (nx, ny) numpy arrays:
-    #         xs, ys, mean_v, var_v, std_v, min_v,
-    #         epistemic_uncertainty, safe_disagreement
-    #     """
-    #     xs = np.linspace(
-    #         env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx
-    #     )
-    #     ys = np.linspace(
-    #         env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny
-    #     )
+        Returns dict of (nx, ny) numpy arrays:
+            xs, ys, mean_v, var_v, std_v, min_v,
+            epistemic_uncertainty, safe_disagreement
+        """
+        xs = np.linspace(
+            env.unwrapped.bounds[0, 0], env.unwrapped.bounds[0, 1], nx
+        )
+        ys = np.linspace(
+            env.unwrapped.bounds[1, 0], env.unwrapped.bounds[1, 1], ny
+        )
 
-    #     keys = ("mean_v", "var_v", "std_v", "min_v",
-    #             "epistemic_uncertainty", "safe_disagreement")
-    #     out  = {k: np.empty((nx, ny)) for k in keys}
+        keys = ("mean_v", "var_v", "std_v", "min_v",
+                "epistemic_uncertainty", "safe_disagreement")
+        out  = {k: np.empty((nx, ny)) for k in keys}
 
-    #     for ix, x in enumerate(xs):
-    #         for iy, y in enumerate(ys):
-    #             st = torch.FloatTensor([x, y]).unsqueeze(0).to(self.device)
-    #             m  = self.get_uncertainty(st)
-    #             out["mean_v"]              [ix, iy] = m["mean_q"].min().item()
-    #             out["var_v"]               [ix, iy] = m["var_q"].min(dim=-1).values.item()
-    #             out["std_v"]               [ix, iy] = m["std_q"].min(dim=-1).values.item()
-    #             out["min_v"]               [ix, iy] = m["min_q"].min().item()
-    #             out["epistemic_uncertainty"][ix, iy] = m["epistemic_uncertainty"].item()
-    #             out["safe_disagreement"]   [ix, iy] = m["safe_disagreement"].item()
+        for ix, x in enumerate(xs):
+            for iy, y in enumerate(ys):
+                st = torch.FloatTensor([x, y, 0, 0]).unsqueeze(0).to(self.device)
+                _, _, control = self.protagonist.sample(st)
+                _, _, disturbance = self.adversary.sample(st)
+                m  = self.get_uncertainty(st, control, disturbance)
+                out["mean_v"]              [ix, iy] = m["mean_q"].min().item()
+                out["var_v"]               [ix, iy] = m["var_q"].min(dim=-1).values.item()
+                out["std_v"]               [ix, iy] = m["std_q"].min(dim=-1).values.item()
+                out["min_v"]               [ix, iy] = m["min_q"].min().item()
+                out["epistemic_uncertainty"][ix, iy] = m["epistemic_uncertainty"].item()
+                out["safe_disagreement"]   [ix, iy] = m["safe_disagreement"].item()
 
-    #     out["xs"], out["ys"] = xs, ys
-    #     return out
+        out["xs"], out["ys"] = xs, ys
+        return out
 
-    # def plot_uncertainty_maps(
-    #     self,
-    #     env,
-    #     out_folder: str,
-    #     nx: int = 41,
-    #     ny: int = 41,
-    #     vmin: float = -4.0,
-    #     vmax: float =  4.0,
-    #     store: bool = True,
-    #     show:  bool = False,
-    # ) -> None:
-    #     """
-    #     4-panel figure:
-    #       mean Q | conservative min Q | epistemic variance | safe disagreement
-    #     """
-    #     print("\n  [Ensemble] Computing uncertainty maps ...")
-    #     maps    = self.get_uncertainty_map(env, nx=nx, ny=ny)
-    #     axStyle = env.unwrapped.get_axes()
-    #     xs, ys  = maps["xs"], maps["ys"]
+    def plot_uncertainty_maps(
+        self,
+        env,
+        out_folder: str,
+        nx: int = 41,
+        ny: int = 41,
+        vmin: float = -4.0,
+        vmax: float =  4.0,
+        store: bool = True,
+        show:  bool = False,
+    ) -> None:
+        """
+        4-panel figure:
+          mean Q | conservative min Q | epistemic variance | safe disagreement
+        """
+        print("\n  [Ensemble] Computing uncertainty maps ...")
+        maps    = self.get_uncertainty_map(env, nx=nx, ny=ny)
+        axStyle = env.unwrapped.get_axes()
+        xs, ys  = maps["xs"], maps["ys"]
 
-    #     panels = [
-    #         ("mean_v",               "seismic",  vmin,  vmax, r"Mean $\hat{V}$ (ensemble avg)"),
-    #         ("min_v",                "seismic",  vmin,  vmax, r"Conservative $\hat{V}$ (min critic)"),
-    #         ("epistemic_uncertainty","YlOrRd",   None,  None, r"Epistemic Uncertainty  Var$_k[Q]$"),
-    #         ("safe_disagreement",    "PuRd",     0,     1,    "Safe / Unsafe Disagreement"),
-    #     ]
+        panels = [
+            ("mean_v",               "seismic",  vmin,  vmax, r"Mean $\hat{V}$ (ensemble avg)"),
+            ("min_v",                "seismic",  vmin,  vmax, r"Conservative $\hat{V}$ (min critic)"),
+            ("epistemic_uncertainty","YlOrRd",   None,  None, r"Epistemic Uncertainty  Var$_k[Q]$"),
+            ("safe_disagreement",    "PuRd",     0,     1,    "Safe / Unsafe Disagreement"),
+        ]
 
-    #     fig, axes = plt.subplots(1, 4, figsize=(22, 5))
-    #     for ax, (key, cmap, lo, hi, title) in zip(axes, panels):
-    #         data  = maps[key]
-    #         im_kw = dict(interpolation='none', extent=axStyle[0],
-    #                      origin='lower', cmap=cmap)
-    #         if lo is not None:
-    #             im_kw.update(vmin=lo, vmax=hi)
-    #         im = ax.imshow(data.T, **im_kw)
-    #         fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=0.9)
-    #         ax.set_title(title, fontsize=11)
-    #         env.unwrapped.plot_target_failure_set(ax=ax)
-    #         env.unwrapped.plot_reach_avoid_set(ax=ax)
-    #         env.unwrapped.plot_formatting(ax=ax)
-    #         if key in ("mean_v", "min_v"):
-    #             ax.contour(xs, ys, data.T, levels=[0],
-    #                        colors='k', linewidths=2, linestyles='dashed')
+        fig, axes = plt.subplots(1, 4, figsize=(22, 5))
+        for ax, (key, cmap, lo, hi, title) in zip(axes, panels):
+            data  = maps[key]
+            im_kw = dict(interpolation='none', extent=axStyle[0],
+                         origin='lower', cmap=cmap)
+            if lo is not None:
+                im_kw.update(vmin=lo, vmax=hi)
+            im = ax.imshow(data.T, **im_kw)
+            fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=0.9)
+            ax.set_title(title, fontsize=11)
+            env.unwrapped.plot_target_failure_set(ax=ax)
+            # env.unwrapped.plot_reach_avoid_set(ax=ax)
+            env.unwrapped.plot_formatting(ax=ax)
+            if key in ("mean_v", "min_v"):
+                ax.contour(xs, ys, data.T, levels=[0],
+                           colors='k', linewidths=2, linestyles='dashed')
 
-    #     fig.suptitle(
-    #         f"Protagonist Ensemble  ({self.num_critics} critics | seed diversification"
-    #         f" | mode={self.mode} | terminalType={self.terminalType})",
-    #         fontsize=13,
-    #     )
-    #     fig.tight_layout()
-    #     if store:
-    #         os.makedirs(out_folder, exist_ok=True)
-    #         path = os.path.join(out_folder, "ensemble_uncertainty.png")
-    #         fig.savefig(path, dpi=150)
-    #         print(f"  [Ensemble] Saved → {path}")
-    #     if show:
-    #         plt.show()
-    #     plt.close(fig)
+        fig.suptitle(
+            f"Protagonist Ensemble  ({self.num_critics} critics | seed diversification)",
+            fontsize=13,
+        )
+        fig.tight_layout()
+        if store:
+            os.makedirs(out_folder, exist_ok=True)
+            path = os.path.join(out_folder, "ensemble_uncertainty.png")
+            fig.savefig(path, dpi=150)
+            print(f"  [Ensemble] Saved → {path}")
+        if show:
+            plt.show()
+        plt.close(fig)
 
     def critic_update(self, critic, critic_optim, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, ep_unc=None):
 
@@ -401,6 +402,8 @@ class SAC(object):
 
         max_qf_next_target = torch.zeros(self.BATCH_SIZE).to(self.device)
 
+        non_final_state_nxt = non_final_state_nxt[non_final_mask.cpu()]
+
         with torch.no_grad():
             next_action, next_log_pi_a, _ = self.protagonist.sample(non_final_state_nxt)
             next_disturb, next_log_pi_d, _ = self.adversary.sample(non_final_state_nxt)
@@ -408,17 +411,16 @@ class SAC(object):
             # protagonist minimises → take the minimum of the two Q-heads
         max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
 
-        # Epistemic-uncertainty weight (FIX 3 – use self.CONFIG.TIME_STEP)
-        _lambda  = 0.1 / ep_unc if ep_unc is not None else 1.0
-        eu_weight = torch.exp(
-            torch.tensor(_lambda * self.CONFIG.TIME_STEP, device=self.device)
-        )
-
-        # eu_weight = 1
+        # Epistemic-uncertainty weight
+        with torch.no_grad():
+            _lambda  = -torch.sqrt(ep_unc) if ep_unc is not None else 1.0
+            # _lambda = 0.1 * torch.ones([self.BATCH_SIZE,1]).to(self.device)
+            eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
+        
         # Reach-avoid backup
         terminal     = torch.max(l_x, g_x)
         non_terminal = torch.max(g_x[non_final_mask],
-            torch.min(l_x[non_final_mask], eu_weight * max_qf_next_target[non_final_mask]))
+            torch.min(l_x[non_final_mask], eu_weight[non_final_mask].squeeze(-1) * max_qf_next_target[non_final_mask]))
 
         next_q_value = torch.zeros(self.BATCH_SIZE).float().to(self.device)
         final_mask = torch.logical_not(non_final_mask)
@@ -427,13 +429,12 @@ class SAC(object):
         )
         next_q_value[final_mask] = terminal[final_mask]
 
-        qf1_loss = 0 * F.l1_loss(qf1, next_q_value.unsqueeze(-1).detach()) + F.mse_loss(qf1, next_q_value.unsqueeze(-1).detach())
-        qf2_loss = 0 * F.l1_loss(qf2, next_q_value.unsqueeze(-1).detach()) + F.mse_loss(qf2, next_q_value.unsqueeze(-1).detach())
+        qf1_loss = F.mse_loss(qf1, next_q_value.unsqueeze(-1).detach())
+        qf2_loss = F.mse_loss(qf2, next_q_value.unsqueeze(-1).detach())
         qf_loss  = qf1_loss + qf2_loss
 
         critic_optim.zero_grad()
         qf_loss.backward()
-        # nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         critic_optim.step()
 
         return qf1_loss, qf2_loss
@@ -462,8 +463,9 @@ class SAC(object):
 
         # ---- sample from replay buffer ---------------------------------
         if batch is None:
-            transitions = memory.sample(self.BATCH_SIZE)
-            batch = Transition(*zip(*transitions))
+            # transitions = memory.sample(self.BATCH_SIZE)
+            # batch = Transition(*zip(*transitions))
+            batch = memory.sample(self.BATCH_SIZE)
 
         (
             non_final_mask,
@@ -477,21 +479,20 @@ class SAC(object):
             l_x,
         ) = self.unpack_batch(batch)
 
-        epistem_uncertainty = self.get_uncertainty(state, action, disturbance)["epistemic_uncertainty"].max().item()
-
+        self.epistem_uncertainty = self.get_uncertainty(state, action, disturbance)["epistemic_uncertainty"]
 
         futures = {
-            self._executor.submit(self.critic_update, c, c_opt, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, epistem_uncertainty): c
+            self._executor.submit(self.critic_update, c, c_opt, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, self.epistem_uncertainty): c
             for c, c_opt in zip(self.critics, self.critic_optimisers)
         }
+
         losses = []
         for fut in as_completed(futures):
             c = futures[fut]
             result = fut.result()
             if result is not None:
                 losses.append(result)
-            # if c is self.critics[0]:
-            #     qf1_loss, qf2_loss = result
+
         q_means = [torch.stack(t).mean(0) for t in zip(*losses)]
         qf1_loss, qf2_loss = q_means
 
@@ -505,8 +506,6 @@ class SAC(object):
             # ----------------------------------------------------------------
             # 2.  Protagonist update  (minimise Q)
             # ----------------------------------------------------------------
-            # qf1_pi, qf2_pi = self.critic[0](state, pi_pro, pi_adv.detach())
-            # max_qf_pi = torch.max(qf1_pi, qf2_pi)
             max_qf_pi = self.Q_network(state, pi_pro, pi_adv.detach())
 
             # Protagonist wants to *minimise* Q  → minimise  Q - α·H
@@ -521,8 +520,6 @@ class SAC(object):
             # ----------------------------------------------------------------
             # 3.  Adversary update  (maximise Q)   
             # ----------------------------------------------------------------
-            # qf1_pi, qf2_pi = self.critic[0](state, pi_pro.detach(), pi_adv)
-            # max_qf_pi = torch.max(qf1_pi, qf2_pi)
             max_qf_pi = self.Q_network(state, pi_pro.detach(), pi_adv)
 
             # The adversary feeds its action into the *same* critic but wants
@@ -570,7 +567,7 @@ class SAC(object):
             self.prev_pro_loss,
             self.prev_adv_loss,
             alpha_tlogs.item(),
-            epistem_uncertainty
+            self.epistem_uncertainty
         )
 
     # ------------------------------------------------------------------
@@ -597,7 +594,6 @@ class SAC(object):
 
     def load_checkpoint(self, modelIter, ckpt_path, evaluate=True):
         pro_ckpt_path = os.path.join(ckpt_path, "pro_model", "model_{}.pt".format(modelIter))
-        # critic_ckpt_path = os.path.join(ckpt_path, "pro_model", "critic_{}.pt".format(modelIter))
         adv_ckpt_path = os.path.join(ckpt_path, "adv_model", "model_{}.pt".format(modelIter))
         print("Loading models from {}".format(pro_ckpt_path))
         if ckpt_path is not None:
@@ -606,18 +602,12 @@ class SAC(object):
             for i, critic in enumerate(self.critics):
                 critic_ckpt_path_i = os.path.join(ckpt_path, "pro_model", "critic_{}".format(i), "critic_{}.pt".format(modelIter))
                 critic.load_state_dict(torch.load(critic_ckpt_path_i, map_location=self.device))
-        
-            # self.critic_target.load_state_dict(ckpt["critic_target_state_dict"])
-            # self.critic_optim.load_state_dict(ckpt["critic_optimizer_state_dict"])
-            # self.protagonist_optim.load_state_dict(ckpt["protagonist_optimizer_state_dict"])
-            # self.adversary_optim.load_state_dict(ckpt["adversary_optimizer_state_dict"])
 
             mode = "eval" if evaluate else "train"
             for net in [self.protagonist, self.adversary, self.critic]:
                 getattr(net, mode)()
         
-        self.Q_network = MeanEnsembleNet([c for c in self.critics])
-        # self.Q_target  = MeanEnsembleNet([c for c in self.critic_targets])
+        self.Q_network = MaxEnsembleNet([c for c in self.critics])
 
     # ------------------------------------------------------------------
     # Update Hyperparameters
@@ -634,12 +624,16 @@ class SAC(object):
                 param_group["lr"] = self.LR_C_END
         else:
             self.scheduler.step()
-            # self.protagonist_scheduler.step()
-            # self.adversary_scheduler.step()
+            self.protagonist_scheduler.step()
+            self.adversary_scheduler.step()
 
         self.GammaScheduler.step()
         self.GAMMA = self.GammaScheduler.get_variable()
 
+    def slice_batch(tensor, idx, batch_size):
+        start = idx * batch_size
+        end = (idx + 1) * batch_size
+        return tensor[start:end]
 
     # ------------------------------------------------------------------
     # Batch unpacking  (unchanged from original)
@@ -652,23 +646,16 @@ class SAC(object):
             (non_final_mask, non_final_state_nxt, state, action,
              reward, g_x, l_x)
         """
-        non_final_mask = torch.tensor(
-            tuple(map(lambda s: s is not None, batch.s_)), dtype=torch.bool
-        ).to(self.device)
+        non_final_mask = torch.tensor(~batch.done, dtype=torch.bool, device=self.device)
 
         state = torch.FloatTensor(np.array(batch.s)).to(self.device)
         action = torch.FloatTensor(np.array(batch.a)).to(self.device)
         action_next = torch.FloatTensor(np.array(batch.a_)).to(self.device)
         disturbance = torch.FloatTensor(np.array(batch.d)).to(self.device)
-        non_final_states = [s for s in batch.s_ if s is not None]
-        non_final_state_nxt = (
-            torch.from_numpy(np.vstack(non_final_states)).float().to(self.device)
-            if non_final_states
-            else torch.zeros(0, state.shape[1], device=self.device)
-        )
+        non_final_state_nxt = torch.FloatTensor(np.array(batch.s_)).to(self.device)    
 
         reward = torch.FloatTensor(np.array(batch.r)).to(self.device)
-        g_x    = torch.FloatTensor([i["g_x"] for i in batch.info]).to(self.device).view(-1)
-        l_x    = torch.FloatTensor([i["l_x"] for i in batch.info]).to(self.device).view(-1)
+        g_x    = torch.FloatTensor(np.array(batch.info["g_x"])).to(self.device)
+        l_x    = torch.FloatTensor(np.array(batch.info["l_x"])).to(self.device)
 
         return non_final_mask, non_final_state_nxt, state, action, action_next, disturbance, reward, g_x, l_x

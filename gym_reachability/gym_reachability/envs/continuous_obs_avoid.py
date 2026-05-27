@@ -55,7 +55,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         self.obs_high = np.concatenate([np.array([6.88, 11.0, np.pi, 2], dtype=np.float32), np.full(self.obs_list.shape[0], np.inf, dtype=np.float32)]) # x, y, theta, v
         self.obs_low = np.concatenate([np.array([0.0, 0.0, -np.pi, -1], dtype=np.float32), np.full(self.obs_list.shape[0], -np.inf, dtype=np.float32)]) # x, y, theta, 2
         self.act_bound = np.array([2.0, 2.0]).T # a, a_w
-        self.d_bound = np.array([0.1, 0.1]).T # d_a, d_w
+        self.d_bound = np.array([0.5, 0.5]).T # d_a, d_w
         self.act_dim = self.act_bound.shape[0]
         self.obs_dim = self.obs_high.shape[0]
 
@@ -376,6 +376,10 @@ class ContinuousObsAvoidEnv(gym.Env):
         disturbance = disturbance * self.d_bound
         u_tot = action + disturbance
         state, [l_x, g_x] = self.integrate_forward(self.state, u_tot)
+        # print(f"""
+        # State:   {self.state}
+        # l_x:     {l_x}
+        # g_x:     {g_x}""")
         self.state = state
 
         fail = g_x > 0
@@ -408,17 +412,6 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         
         done = fail or success
-        # done = fail
-
-        # if success: print(f"""
-        # State:   {self.state}
-        # l_x:     {l_x}
-        # g_x:     {g_x}""")
-
-        # if done: print(f"""
-        # State:   {self.state}
-        # l_x:     {l_x}
-        # g_x:     {g_x}""")
 
         # = `info`
         info = {"g_x": g_x, "l_x": l_x}
@@ -440,10 +433,8 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.ndarray: next state.
         """
         x, y, theta, v = state[:4]
-        
+    
         # one step forward
-        # x_dot = x_dot + self.time_step * u[0]
-        # y_dot = y_dot + self.time_step * u[1]
         v = v + self.time_step * u[0]
         theta = theta + self.time_step * u[1]
         x = x + self.time_step * np.cos(theta) * v
@@ -512,36 +503,42 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.ndarray: y-position of states
             np.ndarray: values
         """
-        v = np.zeros((nx, ny))
-        it = np.nditer(v, flags=['multi_index'])
         xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
         ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
-        while not it.finished:
-            idx = it.multi_index
 
-            x = xs[idx[0]]
-            y = ys[idx[1]]
-            l_x = self.target_margin(np.array([x, y]))
-            g_x = self.safety_margin(np.array([x, y]))
+        # Build all (x, y) grid points at once — shape (nx*ny, 2)
+        grid_x, grid_y = np.meshgrid(xs, ys, indexing='ij')   # (nx, ny) each
+        grid_x_flat = grid_x.ravel()                           # (nx*ny,)
+        grid_y_flat = grid_y.ravel()
 
-            if self.mode == 'normal' or self.mode == 'RA' or self.mode == 'AARA' and sacAgent is None:
-                state = torch.FloatTensor(np.concatenate([np.array([x, y, 0, 0]), self.obs_list])).to(self.device).unsqueeze(0)
+        # Build full state batch — shape (nx*ny, state_dim)
+        zeros      = np.zeros((nx * ny, 2))
+        obs_tiled  = np.tile(self.obs_list, (nx * ny, 1))
+        xy         = np.stack([grid_x_flat, grid_y_flat], axis=1)
+        states_np  = np.concatenate([xy, zeros, obs_tiled], axis=1)  # (nx*ny, state_dim)
+
+        states = torch.FloatTensor(states_np).to(self.device)  # (nx*ny, state_dim)
+
+        with torch.no_grad():
+            if self.mode in ('normal', 'RA') or (self.mode == 'AARA' and sacAgent is None):
+                action      = torch.zeros(nx * ny, self.action_dim, device=self.device)
+                disturbance = torch.zeros(nx * ny, self.dist_dim,   device=self.device)
             elif self.mode == 'AARA' and sacAgent is not None:
-                state = torch.FloatTensor(np.concatenate([np.array([x, y, 0, 0]), self.obs_list])).to(self.device).unsqueeze(0)
-                _, _, action = sacAgent.protagonist.sample(state)
-                _, _, disturbance = sacAgent.adversary.sample(state)
+                _, _, action      = sacAgent.protagonist.sample(states)  # (nx*ny, action_dim)
+                _, _, disturbance = sacAgent.adversary.sample(states)    # (nx*ny, dist_dim)
+            values = sacAgent.Q_network(states, action, disturbance)     # (nx*ny,)
 
-            if addBias:
-                # qf1, qf2 = sacAgent.critic(state, action, disturbance)
-                # value = torch.max(qf1, qf2)
-                value = sacAgent.Q_network(state, action, disturbance) # mean of the critic ensemble (computes max between q1 and q2 already)
-                v[idx] = value + max(l_x, g_x)
-            else:
-                # qf1, qf2 = sacAgent.critic(state, action, disturbance)
-                # value = torch.max(qf1, qf2)
-                value = sacAgent.Q_network(state, action, disturbance) # mean of the critic ensemble (computes max between q1 and q2 already)
-                v[idx] = value 
-            it.iternext()
+        v = values.cpu().numpy().reshape(nx, ny)
+
+        if addBias:
+            # Compute l_x and g_x for all points vectorised
+            bias = np.array([
+                max(self.target_margin(np.array([x, y])),
+                    self.safety_margin(np.array([x, y])))
+                for x, y in zip(grid_x_flat, grid_y_flat)
+            ]).reshape(nx, ny)
+            v = v + bias
+
         return xs, ys, v
 
     # == Trajectory Functions ==
@@ -632,36 +629,24 @@ class ContinuousObsAvoidEnv(gym.Env):
         assert ((num_rnd_traj is None and states is not None)
                 or (num_rnd_traj is not None and states is None)
                 or (len(states) == num_rnd_traj))
-        trajectories = []
         state_hist = []
         control_hist = []
         values = []
 
         if states is None:
-            # nx = 41
-            # ny = 100
-            # xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
-            # ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
-            # results = np.empty((nx, ny), dtype=int)
-            # it = np.nditer(results, flags=['multi_index'])
-            # print()
-            # while not it.finished:
-            #     idx = it.multi_index
-            #     print(idx, end='\r')
-            #     x = xs[idx[0]]
-            #     y = ys[idx[1]]
-            #     state = np.concatenate([np.array([x, y, 0, 0]), self.obs_list])
-            #     # state = np.array([x, y])
-            #     state_traj, result, traj_val, control_traj = self.simulate_one_trajectory(
-            #         sacAgent, T=T, state=state, toEnd=toEnd
-            #     )
-            #     values.append(traj_val)
-            #     state_hist.append(state_traj)
-            #     control_hist.append(control_traj)
-            #     results[idx] = result
-            #     it.iternext()
-            # results = results.reshape(-1)
-            state_hist, results, values, control_hist = self.simulate_all_trajectories(sacAgent, T=T, toEnd=toEnd)
+            nx, ny = 41, 100
+            xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
+            ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
+            N = nx * ny
+
+            # All starting states at once: (N, state_dim)
+            states = np.array([
+                np.concatenate([np.array([xs[i], ys[j], 0, 0]), self.obs_list])
+                for i in range(nx) for j in range(ny)
+            ])
+
+            state_hist, results, values, control_hist = self.simulate_all_trajectories(sacAgent, states_np=states, N=N, T=T, toEnd=toEnd)
+            results.reshape(nx, ny)
         else:
             results = np.empty(shape=(len(states),), dtype=int)
             for idx, state in enumerate(states):
@@ -676,34 +661,26 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         return state_hist, results, values, control_hist
 
-    def simulate_all_trajectories(self, sacAgent, T=250, toEnd=False):
+    def simulate_all_trajectories(self, sacAgent, states_np, N, T=250, toEnd=False):
         protagonist = sacAgent.protagonist
-        adversary = sacAgent.adversary
-
-        nx, ny = 41, 100
-        xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
-        ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
-        N = nx * ny
-
-        # All starting states at once: (N, state_dim)
-        states_np = np.array([
-            np.concatenate([np.array([xs[i], ys[j], 0, 0]), self.obs_list])
-            for i in range(nx) for j in range(ny)
-        ])
+        adversary   = sacAgent.adversary
 
         states = torch.FloatTensor(states_np).to(self.device)  # (N, state_dim)
         results = np.zeros(N, dtype=int)
-        done = np.zeros(N, dtype=bool)
+        done    = np.zeros(N, dtype=bool)
 
-        state_hist = [states_np.copy()]
-        control_hist = []
-        traj_vals = [[max(self.target_margin(states_np[i, :2]), self.safety_margin(states_np[i, :2])) for i in range(N)]]
+        # one list per trajectory, seeded with initial state/empty controls
+        state_hist   = [[states_np[i].copy()] for i in range(N)]  # N lists, each [(state_dim,)]
+        control_hist = [[]                    for i in range(N)]   # N empty lists
+
+        traj_vals = [[max(self.target_margin(states_np[i, :2]),
+                        self.safety_margin(states_np[i, :2]))] for i in range(N)]
 
         for t in range(T):
-            positions = states[:, :2]                          # (N, 2) — numpy, no loop
+            positions = states[:, :2].cpu().numpy()
 
-            safety = self.safety_margin_batch(positions.cpu().numpy())       # (N,)
-            target = self.target_margin_batch(positions.cpu().numpy())       # (N,)
+            safety = self.safety_margin_batch(positions)
+            target = self.target_margin_batch(positions)
 
             results[(~done) & (safety > 0)] = -1
             results[(~done) & (target <= 0)] = 1
@@ -711,22 +688,34 @@ class ContinuousObsAvoidEnv(gym.Env):
             if done.all():
                 break
 
-            active = ~done
-            active_states_t = torch.FloatTensor(states[active].cpu().numpy()).to(self.device)
+            active      = ~done
+            active_idx  = np.where(active)[0]
+            active_states_t = states[active].to(self.device)
 
             with torch.no_grad():
-                _, _, actions = protagonist.sample(active_states_t)  # one batched forward pass
-                _, _, disturbs = adversary.sample(active_states_t)   # one batched forward pass
+                _, _, actions = protagonist.sample(active_states_t)
+                _, _, disturbs = adversary.sample(active_states_t)
 
-            u_tot = (actions.cpu().numpy() * self.act_bound
-                + disturbs.cpu().numpy() * self.d_bound)
+            u_tot      = (actions.cpu().numpy()  * self.act_bound
+                        + disturbs.cpu().numpy() * self.d_bound)   # (n_active, action_dim)
 
-            states[active] = self.integrate_forward_batch(states[active], u_tot)  # pure numpy
+            states[active] = torch.FloatTensor(
+                self.integrate_forward_batch(states[active].cpu(), u_tot)
+            ).to(self.device)
 
-            state_hist.append(states.cpu().numpy().copy())
-            control_hist.append(u_tot)
+            states_np_now = states.cpu().numpy()
 
-        return state_hist, results.reshape(nx, ny), traj_vals, control_hist
+            # append to each active trajectory individually
+            for j, i in enumerate(active_idx):
+                state_hist[i].append(states_np_now[i].copy())
+                control_hist[i].append(u_tot[j].copy())
+
+        # convert each trajectory's list of steps → a single (T_i, dim) array
+        state_hist   = [np.stack(traj, axis=0) for traj in state_hist]    # N x (T_i, state_dim)
+        control_hist = [np.stack(ctrl, axis=0) if ctrl else np.zeros((0, u_tot.shape[-1]))
+                        for ctrl in control_hist]                          # N x (T_i, action_dim)
+
+        return state_hist, results, traj_vals, control_hist
 
     # == Visualizing ==
     def render(self):
@@ -871,12 +860,12 @@ class ContinuousObsAvoidEnv(gym.Env):
         norm      = mcolors.TwoSlopeNorm(vmin=vmin_traj - 1e-6, vcenter=center_traj, vmax=vmax_traj + 1e-6)
         cmap      = cm.get_cmap('RdYlGn_r')
 
-        # for traj in trajectories:
-        #   traj_x, traj_y = traj
-        #   ax.scatter(traj_x[0], traj_y[0], s=48, c=c, zorder=zorder)
-        #   ax.plot(traj_x, traj_y, color=c, linewidth=lw, zorder=zorder)
-
+        colours = ['blue', 'orange', 'pink', 'green', 'red', 'purple']
+        i = 0
         for traj, traj_vals in zip(state_hist, values):
+
+            color = colours[i % len(colours)]
+
             traj = np.array(traj) 
             traj_x, traj_y = traj[:, :2].T
 
@@ -893,8 +882,8 @@ class ContinuousObsAvoidEnv(gym.Env):
 
             # Start point marker colored by initial value
             ax.scatter(traj_x[0], traj_y[0], s=48, zorder=zorder,
-                        color=cmap(norm(traj_vals[0])))
-
+                        color=color)
+            i += 1
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("left", size="5%", pad=0.3)
 
@@ -909,18 +898,13 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         axes = ax[1]
 
-        colours = ['blue', 'orange', 'pink', 'green', 'red']
+        colours = ['blue', 'orange', 'pink', 'green', 'red', 'purple']
 
         for i, (traj, states) in enumerate(zip(control_hist, state_hist)):
 
             # handle more trajectories than colors
             color = colours[i % len(colours)]
 
-            # traj: (T_i, control_dim)
-            # states: (T_i, state_dim)
-
-            # T = traj.shape[0]
-            # t = np.arange(T)
             if states.shape[0] == 1:
                 continue
 

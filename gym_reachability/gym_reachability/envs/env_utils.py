@@ -105,7 +105,8 @@ def intersection_with_rectangle_batch(cx, cy, w, h, px, py):
         t_y = np.where(np.abs(dy) > 1e-10, (h / 2) / np.abs(dy), np.inf)
 
     t = np.minimum(t_x, t_y)  # first wall hit
-    return cx + t * dx, cy + t * dy  # (N,), (N,)
+    t_safe = np.where(np.isinf(t), 0, t)
+    return cx + t_safe * dx, cy + t_safe * dy  # (N,), (N,)
 
 
 def calculate_margin_rect_batch(positions, x_y_w_h, negativeInside=True):
