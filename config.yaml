@@ -7,6 +7,7 @@ environment:
   doneType: "TF" # toThreshold
   costType: "max_ell_g"
   addObs: False
+  numObstacles: 2
   randomSeed: 0
   reward: -1.0
   penalty: 1.0
@@ -22,13 +23,13 @@ training:
   maxUpdates: 2000000
   updateTimes: 10
   updatePeriodEps: 5.0e+5
-  updatePeriodGamma: 2.5e+5
+  updatePeriodGamma: 1.0e+5
   updatePeriodLr: 5.0e+5
   memoryCapacity: 50000 
   checkPeriod: 50000
-  batchSize: 2048
+  batchSize: 512
   maxModel: 100
-  tau: 0.01
+  tau: 0.005
   hardUpdate: 1
   softUpdate: true
   render: false
@@ -43,16 +44,17 @@ training:
 # NN hyper-parameters
 network:
   annealing: true
-  architecture: [2048, 2048]
+  criticArchitecture: [2048, 2048]
+  actorArchitecture: [512, 512]
   learningRate: 0.001
   learningRateActor: 0.001
   learningRateDecay: 0.8
-  gamma: 0.9999
+  gamma: 0.95 # 0.9999
   gammaDecay: 0.1
   eps: 0.5
   epsEnd: 0.05
   epsDecay: 0.7
-  actType: "Tanh"
+  actType: "ReLU"
   numCritics: 3
 
 # RL type

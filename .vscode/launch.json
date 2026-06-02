@@ -13,7 +13,10 @@
             "args": [],
             "program": "${file}",
             "python": "/home/exx/.conda/envs/safetyrl-env/bin/python",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "1"
+            }
         }
     ]
 }

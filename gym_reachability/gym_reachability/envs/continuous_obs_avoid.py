@@ -49,11 +49,13 @@ class ContinuousObsAvoidEnv(gym.Env):
         self.add_obs = self.config.addObs
 
         # Get obstacles
-        self.randomiseObstacles(self.bounds, num_obstacles=5)
+        self.randomiseObstacles(self.bounds, num_obstacles=self.config.numObstacles)
+
+        self.obstaclesTensor = torch.hstack([torch.hstack((torch.tensor(v), torch.tensor(s))) for v, s in self.obstacles]).to(device)
 
         self.state = np.concatenate([np.zeros(4), self.obs_list]) # x, y, theta , v + obstacles
         self.obs_high = np.concatenate([np.array([6.88, 11.0, np.pi, 2], dtype=np.float32), np.full(self.obs_list.shape[0], np.inf, dtype=np.float32)]) # x, y, theta, v
-        self.obs_low = np.concatenate([np.array([0.0, 0.0, -np.pi, -1], dtype=np.float32), np.full(self.obs_list.shape[0], -np.inf, dtype=np.float32)]) # x, y, theta, 2
+        self.obs_low = np.concatenate([np.array([0.0, 0.0, -np.pi, -2], dtype=np.float32), np.full(self.obs_list.shape[0], -np.inf, dtype=np.float32)]) # x, y, theta, 2
         self.act_bound = np.array([2.0, 2.0]).T # a, a_w
         self.d_bound = np.array([0.5, 0.5]).T # d_a, d_w
         self.act_dim = self.act_bound.shape[0]
@@ -117,9 +119,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         """
 
         if start is None:
-            self.state = self.sample_random_state(
-                sample_inside_obs=self.sample_inside_obs
-            )
+            self.state = self.sample_random_state(sample_inside_obs=self.sample_inside_obs)
         else:
             self.state = start
 
@@ -138,7 +138,7 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.ndarray: sampled initial state.
         """
         # Define obstacles as a list of (center_x, center_y, radius)
-        self.randomiseObstacles(self.bounds, num_obstacles=5)
+        self.randomiseObstacles(self.bounds, num_obstacles=self.config.numObstacles)
 
         inside_obs = True
         # Repeat sampling until outside obstacle if needed.
@@ -443,7 +443,6 @@ class ContinuousObsAvoidEnv(gym.Env):
         l_x = self.target_margin(np.array([x, y]))
         g_x = self.safety_margin(np.array([x, y]))
 
-        # state = np.array([x, y, theta])
         next_state = state.copy()
         next_state[:4] = np.array([x, y, theta, v])
 
@@ -582,7 +581,6 @@ class ContinuousObsAvoidEnv(gym.Env):
 
             state_tensor = torch.FloatTensor(state)
             state_tensor = state_tensor.to(self.device).unsqueeze(0)
-
             _, _, action =  protagonist.sample(state_tensor) # deterministic action
             _, _, disturb = adversary.sample(state_tensor) # deterministic disturbance
 

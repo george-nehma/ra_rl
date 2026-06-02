@@ -144,6 +144,8 @@ eval_env = gym.make(
 )
 
 stateDim    = eval_env.unwrapped.state.shape[0]
+obstacles = np.hstack([np.hstack((v, s)) for v, s in eval_env.unwrapped.obstacles])
+obstacleDim = obstacles.shape[0]
 actionNum   = eval_env.unwrapped.action_space.shape[0]
 action_list = np.arange(actionNum)
 print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, actionNum))
@@ -213,12 +215,14 @@ print("\n== Agent Information ==")
 CONFIG = ceConfig(
     DEVICE=device, 
     ENV_NAME=env_name, 
+    NUM_ENVS = args.numEnvs,
     SEED=args.randomSeed,
     MAX_UPDATES=args.maxUpdates, 
     MAX_EP_STEPS=args.maxSteps,
     BATCH_SIZE=args.batchSize,
     MEMORY_CAPACITY=args.memoryCapacity, 
-    ARCHITECTURE=args.architecture,
+    C_ARCHITECTURE=args.criticArchitecture,
+    A_ARCHITECTURE=args.actorArchitecture,
     ACTIVATION=args.actType, 
     # =================== LEARNING RATE .
     GAMMA=args.gamma, 
@@ -266,8 +270,9 @@ if script_args.checkpoint is None:
 
 # == PROTAGONIST — DDQNEnsemble ==========================================
 # CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
-dimList     = [stateDim] + CONFIG.ARCHITECTURE + [actionNum]
-sacAgent = SAC(CONFIG, dimList=dimList, action_space=eval_env.unwrapped.action_space, disturbance_space=eval_env.unwrapped.disturbance_space)  
+c_dimList     = [stateDim] + CONFIG.C_ARCHITECTURE + [actionNum]
+a_dimList     = [stateDim] + CONFIG.A_ARCHITECTURE + [actionNum]
+sacAgent = SAC(CONFIG, c_dimList=c_dimList, a_dimList=a_dimList, action_space=eval_env.unwrapped.action_space, disturbance_space=eval_env.unwrapped.disturbance_space)  
 print(sacAgent)
 print("We want to use: {}, and Agent uses: {}".format(device, sacAgent.device))
 print("Critic is using cuda: ", next(sacAgent.critic.parameters()).is_cuda)
@@ -357,7 +362,7 @@ if plotFigure or storeFigure:
     successRate = np.amax(trainProgress[:, 0])
     print('We pick model with success rate-{:.3f}'.format(successRate))
     # CHANGED: ensemble restore saves per-critic with unique prefixes
-    sacAgent.load_checkpoint(idx * args.checkPeriod, outFolder, evaluate=True)
+    sacAgent.load_checkpoint(args.numEnvs * ((idx * args.checkPeriod + args.numEnvs-1)// args.numEnvs), outFolder, evaluate=True)
 
     # -- grid rollout eval (identical to sim_new_point_mass.py) -----------
     nx = 41 
@@ -383,6 +388,7 @@ if plotFigure or storeFigure:
     disAgreeMtx    = np.empty((nx, ny))
 
     stateTensor  = torch.FloatTensor(states).to(device).unsqueeze(0)
+    # stateTensor = torch.concatenate([stateTensor, sacAgent.obstaclesTensor.repeat(stateTensor.shape[0], 1)], dim=1)  # (nx*ny, state_dim + obs_dim)
 
     _, _, action = sacAgent.protagonist.sample(stateTensor)
     _, _, disturbance = sacAgent.adversary.sample(stateTensor)
@@ -425,6 +431,7 @@ if plotFigure or storeFigure:
         out_folder=figureFolder,
         nx=41, ny=ny,
         vmin=vmin, vmax=vmax,
+        idx = idx * args.checkPeriod,
         store=storeFigure,
         show=plotFigure,
     )

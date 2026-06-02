@@ -1,0 +1,68 @@
+environment:
+  envName: cont-obs-avoid-v0
+  numEnvs: 64
+  doneType: TF
+  costType: max_ell_g
+  addObs: false
+  numObstacles: 2
+  randomSeed: 0
+  reward: -1.0
+  penalty: 1.0
+  scaling: 4.0
+  timeStep: 0.05
+  maxSteps: 300
+training:
+  warmup: true
+  warmupIter: 2000
+  maxUpdates: 10000000
+  updateTimes: 10
+  updatePeriodEps: 500000.0
+  updatePeriodGamma: 100000.0
+  updatePeriodLr: 500000.0
+  memoryCapacity: 200000
+  checkPeriod: 50000
+  batchSize: 4096
+  maxModel: 100
+  tau: 0.005
+  hardUpdate: 1
+  softUpdate: true
+  render: false
+  double: true
+  plotTrainValue: true
+  alpha: 0.185
+  policy: Gaussian
+  targetUpdateInterval: 1
+  autoAlphaTuning: true
+network:
+  annealing: true
+  criticArchitecture:
+  - 2048
+  - 2048
+  actorArchitecture:
+  - 512
+  - 512
+  learningRate: 0.001
+  learningRateActor: 0.001
+  learningRateDecay: 0.8
+  gamma: 0.95
+  gammaDecay: 0.1
+  eps: 0.5
+  epsEnd: 0.05
+  epsDecay: 0.7
+  actType: ReLU
+  numCritics: 3
+rl:
+  mode: AARA
+  terminalType: max
+file:
+  showTime: true
+  name: ''
+  outFolder: experiments
+  plotFigure: false
+  storeFigure: true
+  storeBest: false
+adversary:
+  selectWorstQ: false
+  findMaxQ: true
+  simMaxQ: true
+  testMaxQ: true

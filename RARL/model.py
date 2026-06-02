@@ -171,7 +171,7 @@ class StepLR(_scheduler):
 class StepLRMargin(_scheduler):
 
   def __init__(
-      self, initValue, period, goalValue, decay=0.1, endValue=1, last_epoch=-1,
+      self, initValue, period, goalValue, decay=0.1, endValue=1, last_epoch=-1, numEnvs=1,
       verbose=False
   ):
     """Initializes an object of the scheduler with the specified attributes.
@@ -193,6 +193,7 @@ class StepLRMargin(_scheduler):
     self.decay = decay
     self.endValue = endValue
     self.goalValue = goalValue
+    self.numEnvs = numEnvs
     super(StepLRMargin, self).__init__(last_epoch, verbose)
 
   def get_value(self):
@@ -201,8 +202,8 @@ class StepLRMargin(_scheduler):
     if self.cnt == -1:
       return self.initValue
 
-    numDecay = int(self.cnt / self.period)
-    #if numDecay > 0:
+    numDecay = int((self.cnt * self.numEnvs) / self.period)
+    # if numDecay > 0:
     #  print('gamma update')
     tmpValue = self.goalValue - (self.goalValue
                                  - self.initValue) * (self.decay**numDecay)
@@ -283,22 +284,22 @@ def build_mlp(dimList, activation):
 
     return nn.Sequential(*layers)
 
-class ValueNetwork(nn.Module):
-    def __init__(self,CONFIG, dimList):
-        super(ValueNetwork, self).__init__()
+# class ValueNetwork(nn.Module):
+#     def __init__(self,CONFIG, dimList):
+#         super(ValueNetwork, self).__init__()
 
-        self.config = CONFIG
-        self.actType = CONFIG.ACTIVATION
-        sa_dimList = dimList.copy()
-        sa_dimList[-1] = 1  # output is Q-value
+#         self.config = CONFIG
+#         self.actType = CONFIG.ACTIVATION
+#         sa_dimList = dimList.copy()
+#         sa_dimList[-1] = 1  # output is Q-value
 
-        self.value_head = build_mlp(sa_dimList, self.actType)
+#         self.value_head = build_mlp(sa_dimList, self.actType)
 
-        self.apply(weights_init_)
+#         self.apply(weights_init_)
 
-    def forward(self, state):
-        x = self.value_head(state)
-        return x
+#     def forward(self, state):
+#         x = self.value_head(state)
+#         return x
 
 
 class QNetwork(nn.Module):

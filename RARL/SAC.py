@@ -66,7 +66,7 @@ class MaxEnsembleNet(nn.Module):
 
 
 class SAC(object):
-    def __init__(self, config, dimList, action_space, disturbance_space, n_workers: int = None,):
+    def __init__(self, config, c_dimList, a_dimList, action_space, disturbance_space, n_workers: int = None,):
 
         # ----------------------------------------------------------------
         # Hyper-parameters  (kept as both lower- and UPPER-case so that
@@ -96,7 +96,8 @@ class SAC(object):
 
         self.n_workers    = n_workers if n_workers is not None else self.num_critics
 
-        self.dimList    = dimList
+        self.c_dimList    = c_dimList
+        self.a_dimList    = a_dimList
 
         self.policy_type           = config.POLICY
         self.target_update_interval = config.TARGET_UPDATE_INTERVAL
@@ -124,7 +125,7 @@ class SAC(object):
         for i in range(self.num_critics):
             cfg_i = copy.deepcopy(config)
             cfg_i.SEED += i
-            self.critic = QNetwork(config, dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
+            self.critic = QNetwork(config, self.c_dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
 
             self.critics.append(self.critic)
             print(
@@ -140,7 +141,7 @@ class SAC(object):
             )
             self.schedulers.append(self.scheduler)
 
-            self.critic_target = QNetwork(config, dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
+            self.critic_target = QNetwork(config, self.c_dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
             hard_update(self.critic_target, self.critic)
             self.critic_targets.append(self.critic_target)
 
@@ -158,11 +159,12 @@ class SAC(object):
         # Discount factor: anneal to one
         self.GAMMA      = config.GAMMA 
         self.GammaScheduler = StepLRMargin(
-            initValue=self.CONFIG.GAMMA,
-            period=self.CONFIG.GAMMA_PERIOD,
-            decay=self.CONFIG.GAMMA_DECAY,
-            endValue=self.CONFIG.GAMMA_END,
+            initValue=config.GAMMA,
+            period=config.GAMMA_PERIOD,
+            decay=config.GAMMA_DECAY,
+            endValue=config.GAMMA_END,
             goalValue=1.0,
+            numEnvs = config.NUM_ENVS
         )
         self.GAMMA = self.GammaScheduler.get_variable()
 
@@ -173,10 +175,10 @@ class SAC(object):
         if self.policy_type != "Gaussian":
             self.alpha = 0  # deterministic → no entropy bonus
 
-        self.protagonist       = PolicyCls(config, dimList, action_space.shape[0], action_space, conditioned_sigma=True).to(self.device)
+        self.protagonist       = PolicyCls(config, self.a_dimList, action_space.shape[0], action_space, conditioned_sigma=True).to(self.device)
         self.protagonist_optim = optim.AdamW(self.protagonist.parameters(), lr=config.LR_A, weight_decay=1e-3)
 
-        self.adversary       = PolicyCls(config, dimList, disturbance_space.shape[0], disturbance_space, conditioned_sigma=True).to(self.device)
+        self.adversary       = PolicyCls(config, self.a_dimList, disturbance_space.shape[0], disturbance_space, conditioned_sigma=True).to(self.device)
         self.adversary_optim = optim.AdamW(self.adversary.parameters(), lr=config.LR_A, weight_decay=1e-3)
 
         self.protagonist_scheduler = optim.lr_scheduler.StepLR(
@@ -341,6 +343,7 @@ class SAC(object):
         ny: int = 41,
         vmin: float = -4.0,
         vmax: float =  4.0,
+        idx: int = 0,
         store: bool = True,
         show:  bool = False,
     ) -> None:
@@ -378,7 +381,7 @@ class SAC(object):
                            colors='k', linewidths=2, linestyles='dashed')
 
         fig.suptitle(
-            f"Protagonist Ensemble  ({self.num_critics} critics | seed diversification)",
+            f"Protagonist Ensemble  ({self.num_critics} critics | seed diversification | @ update {idx})",
             fontsize=13,
         )
         fig.tight_layout()
@@ -414,7 +417,6 @@ class SAC(object):
         # Epistemic-uncertainty weight
         with torch.no_grad():
             _lambda  = -torch.sqrt(ep_unc) if ep_unc is not None else 1.0
-            # _lambda = 0.1 * torch.ones([self.BATCH_SIZE,1]).to(self.device)
             eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
         
         # Reach-avoid backup
@@ -536,7 +538,10 @@ class SAC(object):
         # 4.  Alpha / entropy tuning (disabled – kept for future use)
         # ----------------------------------------------------------------
         if self.autoAlphaTuning and updates % 8 == 0:
-            pro_alpha_loss = -(self.pro_log_alpha * (log_pi_pro + self.pro_target_entropy).detach()).mean()
+            beta = 100
+            eff_pro_target_entropy = self.pro_target_entropy * torch.exp(-self.epistem_uncertainty.detach()*beta)
+
+            pro_alpha_loss = -(self.pro_log_alpha * (log_pi_pro + eff_pro_target_entropy).detach()).mean()
             self.pro_alpha_optim.zero_grad()
             pro_alpha_loss.backward()
             self.pro_alpha_optim.step()
@@ -544,7 +549,8 @@ class SAC(object):
                 self.pro_log_alpha.data.clamp_(-10, 2)
             self.alpha_pro = self.pro_log_alpha.exp()
 
-            adv_alpha_loss = -(self.adv_log_alpha * (log_pi_adv + self.adv_target_entropy).detach()).mean()
+            eff_adv_target_entropy = self.adv_target_entropy * torch.exp(-self.epistem_uncertainty.detach()*beta)
+            adv_alpha_loss = -(self.adv_log_alpha * (log_pi_adv + eff_adv_target_entropy).detach()).mean()
             self.adv_alpha_optim.zero_grad()
             adv_alpha_loss.backward()
             self.adv_alpha_optim.step()

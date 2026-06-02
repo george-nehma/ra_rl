@@ -232,7 +232,7 @@ class SACTrainer:
                 self.store_transition(s, u, d, r, s_store, a_next, terminated, info)
 
             # ---- periodic evaluation --------------------------------
-            if cntUpdate != 0 and cntUpdate % checkPeriod == 0:
+            if cntUpdate != 0 and cntUpdate // checkPeriod > (cntUpdate - env.num_envs) // checkPeriod:
                 results = eval_env.unwrapped.simulate_trajectories( 
                                 self.agent, 
                                 T=MAX_EP_STEPS, 

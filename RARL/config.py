@@ -19,9 +19,9 @@ class config(object):
       LR_C_PERIOD=1, LR_C_DECAY=0.5, LR_A=1e-4, LR_A_END=1e-5,
       LR_A_PERIOD=1, LR_A_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
       GAMMA_PERIOD=200, GAMMA_DECAY=0.5, MEMORY_CAPACITY=10000, BATCH_SIZE=512,
-      RENDER=False, MAX_MODEL=5, ARCHITECTURE=None, ACTIVATION="Tanh",
+      RENDER=False, MAX_MODEL=5, A_ARCHITECTURE=None, C_ARCHITECTURE=None, ACTIVATION="Tanh",
       SKIP=False, REWARD=-1, PENALTY=1, SELECT_WORST_Q=True, FIND_MAX_Q=False, 
-      SIM_MAX_Q=False, TIME_STEP=0.05
+      SIM_MAX_Q=False, TIME_STEP=0.05, NUM_ENVS=1
   ):
     """Initializes an object of the config class with the specified attributes.
 
@@ -60,15 +60,20 @@ class config(object):
             Defaults to False.
         MAX_MODEL (int, optional): maximal number of models you want to
             store during the training process. Defaults to 5.
-        ARCHITECTURE (list, optional): the architecture of the hidden
-            layers of the neural network. Defaults to [512, 512, 512].
+        A_ARCHITECTURE (list, optional): the architecture of the actor network.
+            Defaults to [512, 512, 512].
+        C_ARCHITECTURE (list, optional): the architecture of the critic network.
+            Defaults to [512, 512, 512].
         ACTIVATION (str, optional): the activation function used in the neural
             network. Defaults to 'Tanh'.
     """
-    if ARCHITECTURE is None:
-      ARCHITECTURE = [512, 512, 512]
+    if A_ARCHITECTURE is None:
+      A_ARCHITECTURE = [512, 512, 512]
+    if C_ARCHITECTURE is None:
+      C_ARCHITECTURE = [512, 512, 512]
     self.MAX_UPDATES = MAX_UPDATES
     self.MAX_EP_STEPS = MAX_EP_STEPS
+    self.NUM_ENVS = NUM_ENVS
 
     self.EPSILON = EPSILON
     self.EPS_END = EPS_END
@@ -101,7 +106,8 @@ class config(object):
     self.MAX_MODEL = MAX_MODEL
     self.DEVICE = DEVICE
 
-    self.ARCHITECTURE = ARCHITECTURE
+    self.A_ARCHITECTURE = A_ARCHITECTURE
+    self.C_ARCHITECTURE = C_ARCHITECTURE
     self.ACTIVATION = ACTIVATION
     self.SKIP = SKIP
 
@@ -196,10 +202,10 @@ class ceConfig(config):
       LR_A_PERIOD=1, LR_A_DECAY=0.5, GAMMA=0.9, GAMMA_END=0.99999999,
       GAMMA_PERIOD=200, GAMMA_DECAY=0.5, TAU=0.01, HARD_UPDATE=1,
       SOFT_UPDATE=True, MEMORY_CAPACITY=10000, BATCH_SIZE=512, RENDER=False,
-      MAX_MODEL=10, DOUBLE=True, ARCHITECTURE=None, ACTIVATION="Tanh",
+      MAX_MODEL=10, DOUBLE=True, A_ARCHITECTURE=None, C_ARCHITECTURE=None, ACTIVATION="Tanh",
       SKIP=False, REWARD=-1, PENALTY=1, NUM_CRITICS=3, SELECT_WORST_Q=True,
       FIND_MAX_Q=False, SIM_MAX_Q=False, TIME_STEP=0.05, ALPHA=0.2, POLICY="Gaussian",
-      TARGET_UPDATE_INTERVAL=1, AUTO_ALPHA_TUNING=True
+      TARGET_UPDATE_INTERVAL=1, AUTO_ALPHA_TUNING=True, NUM_ENVS = 1,
   ):
     """
     Initializes a configuration object for (double) deep Q-network with the
@@ -215,10 +221,13 @@ class ceConfig(config):
         SOFT_UPDATE (bool, optional): the way you update the target network.
             Defaults to True.
     """
-    if ARCHITECTURE is None:
-      ARCHITECTURE = [512, 512, 512]
+    if C_ARCHITECTURE is None:
+      C_ARCHITECTURE = [512, 512, 512]
+    if A_ARCHITECTURE is None:
+      A_ARCHITECTURE = [512, 512, 512]
     super().__init__(
         ENV_NAME=ENV_NAME,
+        NUM_ENVS = NUM_ENVS,
         DEVICE=DEVICE,
         SEED=SEED,
         MAX_UPDATES=MAX_UPDATES,
@@ -244,7 +253,8 @@ class ceConfig(config):
         BATCH_SIZE=BATCH_SIZE,
         RENDER=RENDER,
         MAX_MODEL=MAX_MODEL,
-        ARCHITECTURE=ARCHITECTURE,
+        A_ARCHITECTURE=A_ARCHITECTURE,
+        C_ARCHITECTURE=C_ARCHITECTURE,
         ACTIVATION=ACTIVATION,
         SKIP=SKIP,
         REWARD=REWARD,
