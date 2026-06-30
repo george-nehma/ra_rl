@@ -26,7 +26,7 @@ import os
 import time
 
 from .model import Model
-from .ReplayMemory import ReplayMemory
+from .QReplayMemory import QReplayMemory
 from .DDQN import DDQN, Transition
 
 Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "info"])
@@ -52,7 +52,7 @@ class Trainer():
     Args:
         CONFIG (object): configuration.
     """
-    self.memory = ReplayMemory(CONFIG.MEMORY_CAPACITY)
+    self.memory = QReplayMemory(CONFIG.MEMORY_CAPACITY)
 
   def store_transition(self, *args):
     """Stores the transition into the replay buffer.

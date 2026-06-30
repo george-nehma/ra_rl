@@ -75,7 +75,7 @@ class SACTrainer:
                 / (s_, r, done, _, info) = env.step((u, d)) interface.
         """
         cnt = 0
-        s, info = env.reset()
+        s, info = env.reset(seed=self.CONFIG.SEED)
         episode_start = np.zeros(env.num_envs, dtype=bool)
         while len(self.memory) < self.memory.capacity:
             # cnt += env.num_envs
@@ -125,7 +125,6 @@ class SACTrainer:
         vmin           = -1,
         vmax           = 1,
         numRndTraj     = 200,
-        itr_init       = 0,
         storeModel     = True,
         storeBest      = False,
         outFolder      = "SAC_RA",
@@ -181,11 +180,11 @@ class SACTrainer:
             os.makedirs(pro_modelFolder, exist_ok=True)
             os.makedirs(adv_modelFolder, exist_ok=True)
         if storeFigure:
-            figureFolder = os.path.join(outFolder, "figure")
+            figureFolder = os.path.join(outFolder, "train_figures")
             os.makedirs(figureFolder, exist_ok=True)
 
-        trainingRecords  = []
-        trainProgress    = []
+        trainingRecords  = [] 
+        trainProgress    = [] 
         runningCost      = 0.0
         checkPointSucc   = 0.0
         ep               = 0
@@ -199,8 +198,8 @@ class SACTrainer:
         # Main loop
         # ----------------------------------------------------------------
         t0_learn = time.time()
-        s, info = env.reset()
-        _, _ = eval_env.reset()
+        s, info = env.reset(seed=self.CONFIG.SEED)
+        _, _ = eval_env.reset(seed=self.CONFIG.SEED)
         epCost  = np.zeros(env.num_envs, dtype=np.float64)
         ep += env.num_envs
         episode_start = np.zeros(env.num_envs, dtype=bool)
@@ -232,7 +231,8 @@ class SACTrainer:
                 self.store_transition(s, u, d, r, s_store, a_next, terminated, info)
 
             # ---- periodic evaluation --------------------------------
-            if cntUpdate != 0 and cntUpdate // checkPeriod > (cntUpdate - env.num_envs) // checkPeriod:
+            if cntUpdate != curUpdates and cntUpdate // checkPeriod > (cntUpdate - env.num_envs) // checkPeriod:
+                eval_env.reset(seed=self.CONFIG.SEED)
                 results = eval_env.unwrapped.simulate_trajectories( 
                                 self.agent, 
                                 T=MAX_EP_STEPS, 
@@ -268,13 +268,13 @@ class SACTrainer:
                         if success > checkPointSucc:
                             checkPointSucc = success
                             self._save_models(
-                                cntUpdate+itr_init,
+                                cntUpdate,
                                 pro_modelFolder,
                                 adv_modelFolder,
                             )
                     else:
                         self._save_models(
-                            cntUpdate+itr_init, pro_modelFolder, adv_modelFolder
+                            cntUpdate, pro_modelFolder, adv_modelFolder
                         )
 
                 if (plotFigure or storeFigure) and plotTrainValue:
@@ -288,7 +288,7 @@ class SACTrainer:
                     )
                     if storeFigure:
                         figurePath = os.path.join(
-                            figureFolder, "{:d}.png".format(cntUpdate+itr_init)
+                            figureFolder, "{:d}.png".format(cntUpdate)
                         )
                         plt.savefig(figurePath)
                     if plotFigure:
@@ -327,12 +327,12 @@ class SACTrainer:
                 )
             
             # Log losses
-            logger.add_scalar("Loss/protagonist", pro_loss, cntUpdate+itr_init)
-            logger.add_scalar("Loss/adversary", adv_loss, cntUpdate+itr_init)
-            logger.add_scalar("Loss/critic1", qf1_loss, cntUpdate+itr_init)
-            logger.add_scalar("Loss/critic2", qf2_loss, cntUpdate+itr_init)
-            logger.add_scalar("HyperParam/alpha_pro", float(alpha_tlogs), cntUpdate+itr_init)
-            logger.add_scalar("HyperParam/Epistemic_uncertainty", epistemic_uncertainty.mean(), cntUpdate+itr_init)
+            logger.add_scalar("Loss/protagonist", pro_loss, cntUpdate)
+            logger.add_scalar("Loss/adversary", adv_loss, cntUpdate)
+            logger.add_scalar("Loss/critic1", qf1_loss, cntUpdate)
+            logger.add_scalar("Loss/critic2", qf2_loss, cntUpdate)
+            logger.add_scalar("HyperParam/alpha_pro", float(alpha_tlogs), cntUpdate)
+            logger.add_scalar("HyperParam/Epistemic_uncertainty", epistemic_uncertainty.mean(), cntUpdate)
 
             cntUpdate += env.num_envs
 
@@ -354,7 +354,7 @@ class SACTrainer:
             if runningCostThr is not None and runningCost <= runningCostThr:
                 print(
                     "\nSolved at update {:d}!"
-                    " Running cost = {:.2f}.".format(cntUpdate+itr_init, runningCost)
+                    " Running cost = {:.2f}.".format(cntUpdate, runningCost)
                 )
                 env.close()
                 logger.close()
@@ -364,7 +364,7 @@ class SACTrainer:
 
         # ---- final save ------------------------------------------------
         if storeModel:
-            self._save_models(cntUpdate+itr_init, pro_modelFolder, adv_modelFolder)
+            self._save_models(cntUpdate, pro_modelFolder, adv_modelFolder)
 
         print(
             "\nLearning: {:.1f}s".format(t1_learn - t0_learn))
@@ -383,7 +383,7 @@ class SACTrainer:
         adv_path = os.path.join(adv_folder, "model_{:d}.pt".format(cntUpdate))
         torch.save(self.agent.protagonist.state_dict(), pro_path)
         torch.save(self.agent.adversary.state_dict(),   adv_path)
-        if hasattr(self.agent, "critic"):
+        if hasattr(self.agent, "critics"):
             for i, c in enumerate(self.agent.critics):
                 sub = os.path.join(pro_folder, f"critic_{i}")
                 os.makedirs(sub, exist_ok=True)

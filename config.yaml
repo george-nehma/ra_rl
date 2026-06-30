@@ -7,11 +7,11 @@ environment:
   doneType: "TF" # toThreshold
   costType: "max_ell_g"
   addObs: False
-  numObstacles: 2
-  randomSeed: 0
+  numObstacles: 5
+  randomSeed: 4
   reward: -1.0
   penalty: 1.0
-  scaling: 4.0
+  scaling: 16.0
   timeStep: 0.05
   maxSteps: 300
 
@@ -20,14 +20,14 @@ environment:
 training:
   warmup: true
   warmupIter: 2000
-  maxUpdates: 2000000
+  maxUpdates: 1000000
   updateTimes: 10
   updatePeriodEps: 5.0e+5
   updatePeriodGamma: 1.0e+5
   updatePeriodLr: 5.0e+5
   memoryCapacity: 50000 
   checkPeriod: 50000
-  batchSize: 512
+  batchSize: 256
   maxModel: 100
   tau: 0.005
   hardUpdate: 1
@@ -44,8 +44,8 @@ training:
 # NN hyper-parameters
 network:
   annealing: true
-  criticArchitecture: [2048, 2048]
-  actorArchitecture: [512, 512]
+  criticArchitecture: [256, 256]
+  actorArchitecture: [256, 256]
   learningRate: 0.001
   learningRateActor: 0.001
   learningRateDecay: 0.8

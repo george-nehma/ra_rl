@@ -13,6 +13,10 @@ def intersection_with_rectangle(cx, cy, w, h, px, py):
     dx = px - cx
     dy = py - cy
 
+    # Handle center case when dx=dy=0
+    if dx == 0 and dy == 0:
+        return cx, cy
+    
     # Avoid division by zero
     if dx == 0:
         t_y = (hh if dy > 0 else -hh) / dy
@@ -41,35 +45,32 @@ def intersection_with_rectangle(cx, cy, w, h, px, py):
 
 
 # == margin ==
-def calculate_margin_rect(s, x_y_w_h, negativeInside=True):
-  """Calculates the margin to a rectangular box in the x-y state space.
+# def calculate_margin_rect(s, x_y_w_h, negativeInside=True):
+#   """Calculates the margin to a rectangular box in the x-y state space.
 
-    Args:
-        s (np.ndarray): the state of the agent. It requires that s[0] is the
-            x position and s[1] is the y position.
-        x_y_w_h (tuple of floats): (center_x, center_y, width, height).
-        negativeInside (bool, optional): add a negative sign to the distance
-            if inside the box. Defaults to True.
+#     Args:
+#         s (np.ndarray): the state of the agent. It requires that s[0] is the
+#             x position and s[1] is the y position.
+#         x_y_w_h (tuple of floats): (center_x, center_y, width, height).
+#         negativeInside (bool, optional): add a negative sign to the distance
+#             if inside the box. Defaults to True.
 
-    Returns:
-        float: margin.
-    """
-  x, y, w, h = x_y_w_h
+#     Returns:
+#         float: margin.
+#     """
+#   x, y, w, h = x_y_w_h
 
-  x_r, y_r = intersection_with_rectangle(x, y, w, h, s[0], s[1])
+#   x_r, y_r = intersection_with_rectangle(x, y, w, h, s[0], s[1])
 
-  if s[0] >= x - w/2 and s[0] <= x + w/2 and s[1] >= y - h/2 and s[1] <= y + h/2:
-    margin = -np.sqrt((x_r - x)**2 + (y_r - y)**2) - np.sqrt((s[0] - x)**2 + (s[1] - y)**2)
-  else:
-    margin = -np.sqrt((x_r - x)**2 + (y_r - y)**2) + np.sqrt((s[0] - x)**2 + (s[1] - y)**2)
-#   delta_x = np.abs(s[0] - x)
-#   delta_y = np.abs(s[1] - y)
-#   margin = max(delta_y - h/2, delta_x - w/2)
+#   if s[0] >= x - w/2 and s[0] <= x + w/2 and s[1] >= y - h/2 and s[1] <= y + h/2:
+#     margin = -np.sqrt((x_r - x)**2 + (y_r - y)**2) - np.sqrt((s[0] - x)**2 + (s[1] - y)**2) # inside the obstacle
+#   else:
+#     margin = -np.sqrt((x_r - x)**2 + (y_r - y)**2) + np.sqrt((s[0] - x)**2 + (s[1] - y)**2) # outside the obstacle
 
-  if negativeInside:
-    return margin
-  else:
-    return -margin
+#   if negativeInside:
+#     return margin
+#   else:
+#     return -margin
 
 
 def calculate_margin_circle(s, c_r, negativeInside=True):
@@ -86,13 +87,15 @@ def calculate_margin_circle(s, c_r, negativeInside=True):
         float: margin.
     """
   center, radius = c_r
-  dist_to_center = np.linalg.norm(s[:2] - center)
+  dist_to_center = np.linalg.norm(s - center, axis=1)
+  dir_x = (s[:, 0] - center[0]) / (dist_to_center + 1.0e-10)
+  dir_y = (s[:, 1] - center[1]) / (dist_to_center + 1.0e-10)
   margin = dist_to_center - radius
 
   if negativeInside:
-    return margin
+    return dir_x, dir_y, margin
   else:
-    return -margin
+    return dir_x, dir_y, -margin
 
 def intersection_with_rectangle_batch(cx, cy, w, h, px, py):
     """Ray from rectangle center through each point, intersected with boundary. Batched."""
@@ -109,7 +112,7 @@ def intersection_with_rectangle_batch(cx, cy, w, h, px, py):
     return cx + t_safe * dx, cy + t_safe * dy  # (N,), (N,)
 
 
-def calculate_margin_rect_batch(positions, x_y_w_h, negativeInside=True):
+def calculate_margin_rect(positions, x_y_w_h, negativeInside=True):
     """Batched version of calculate_margin_rect. positions: (N, 2)"""
     cx, cy, w, h = x_y_w_h
     px, py = positions[:, 0], positions[:, 1]
@@ -126,12 +129,12 @@ def calculate_margin_rect_batch(positions, x_y_w_h, negativeInside=True):
     return margin if negativeInside else -margin
 
 
-def calculate_margin_circle_batch(positions, c_r, negativeInside=True):
-    """Batched version of calculate_margin_circle. positions: (N, 2)"""
-    center, radius = c_r
-    dist = np.linalg.norm(positions - center, axis=1)  # (N,)
-    margin = dist - radius
-    return margin if negativeInside else -margin
+# def calculate_margin_circle_batch(positions, c_r, negativeInside=True):
+#     """Batched version of calculate_margin_circle. positions: (N, 2)"""
+#     center, radius = c_r
+#     dist = np.linalg.norm(positions - center, axis=1)  # (N,)
+#     margin = dist - radius
+#     return margin if negativeInside else -margin
 
 # == Plotting ==
 def plot_arc(

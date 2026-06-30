@@ -2,7 +2,7 @@
 
 # Environment parameters
 environment:
-  envName: "zermelo_show-v0"
+  envName: "abv-v0"
   doneType: "TF" # toThreshold
   costType: "max_ell_g"
   randomSeed: 0
@@ -11,6 +11,7 @@ environment:
   scaling: 4.0
   timeStep: 0.05
   maxSteps: 250
+  addObs: False
 
 
 # Training scheme
@@ -23,8 +24,8 @@ training:
   updatePeriodGamma: 2.5e+4
   updatePeriodLr: 5.0e+4
   memoryCapacity: 10000 
-  checkPeriod: 20000
-  batchSize: 64
+  checkPeriod: 30000
+  batchSize: 256
   maxModel: 100
   tau: 0.01
   hardUpdate: 1
@@ -39,8 +40,8 @@ training:
 
 # NN hyper-parameters
 network:
-  annealing: false
-  architecture: [100, 20]
+  annealing: true
+  architecture: [512, 512]
   learningRate: 0.001
   learningRateDecay: 0.8
   gamma: 0.9999
@@ -48,7 +49,7 @@ network:
   eps: 0.5
   epsEnd: 0.05
   epsDecay: 0.7
-  actType: "Tanh"
+  actType: "ReLU"
   numCritics: 3
 
 # RL type

@@ -32,7 +32,8 @@ from types import SimpleNamespace
 from RARL.SACTrainer import SACTrainer
 from RARL.SAC import SAC
 from RARL.config import ceConfig
-from RARL.utils import save_obj
+from RARL.utils import save_obj, load_obj
+from gym_reachability.gym_reachability.envs.env_utils import calculate_margin_circle
 from utils.utils import (
     plot_protagonist_adversary_actions,
     plot_RA_eval,
@@ -50,7 +51,7 @@ timestr = time.strftime("%Y-%m-%d-%H_%M_%S")
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="config.yaml", type=str)
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint to load (for evaluation or resuming training).")
-parser.add_argument("--checkpointVal", type=int, default=50000, help="Checkpoint iteration to load for evaluation (ignored if --checkpoint not provided).")
+parser.add_argument("--numitr", type=int, default=500000, help="Number of iterations to extend training (ignored if --checkpoint not provided).")
 parser.add_argument(
     "--num_jobs", type=int, default=4,
     help="Total number of sim_ensemble.py processes running in parallel. "
@@ -97,13 +98,17 @@ plotFigure   = args.plotFigure
 
 if script_args.checkpoint is not None:
     outFolder = script_args.checkpoint
+    chkFolder = os.path.join(outFolder, 'pretrain_' + timestr)
+    figureFolder = os.path.join(chkFolder, 'eval_figures')
+    os.makedirs(figureFolder, exist_ok=True)
+    args.randomSeed = 0
 elif args.showTime:
     fn = args.name + args.doneType
     fn = fn + '-' + timestr
     outFolder    = os.path.join(args.outFolder, 'ensemble', str(args.numCritics)+ "critics", env_title, 'SAC', args.mode, fn)
+    figureFolder = os.path.join(outFolder, 'eval_figures')
+    os.makedirs(figureFolder, exist_ok=True)
 
-figureFolder = os.path.join(outFolder, 'figure')
-os.makedirs(figureFolder, exist_ok=True)
 print(outFolder)
 
 # == Epsilon / gamma schedule — identical to sim_new_point_mass.py ==
@@ -143,9 +148,7 @@ eval_env = gym.make(
     sample_inside_obs=sample_inside_obs
 )
 
-stateDim    = eval_env.unwrapped.state.shape[0]
-obstacles = np.hstack([np.hstack((v, s)) for v, s in eval_env.unwrapped.obstacles])
-obstacleDim = obstacles.shape[0]
+stateDim    = eval_env.unwrapped.observation_space.shape[0]
 actionNum   = eval_env.unwrapped.action_space.shape[0]
 action_list = np.arange(actionNum)
 print("State Dimension: {:d}, ActionSpace Dimension: {:d}".format(stateDim, actionNum))
@@ -160,7 +163,7 @@ eval_env.reset(seed=args.randomSeed)
 
 # == Environment margin plots (unchanged from sim_new_point_mass.py) ==
 if plotFigure or storeFigure:
-    nx, ny = 101, 101
+    nx, ny = 201, 201
     vmin = -1 * args.scaling
     vmax =  1 * args.scaling
     v    = np.zeros((nx, ny))
@@ -268,8 +271,7 @@ if script_args.checkpoint is None:
     with open(os.path.join(outFolder,'init_configs.yaml'), "w") as f:
         yaml.dump(config_dict, f, sort_keys=False)
 
-# == PROTAGONIST — DDQNEnsemble ==========================================
-# CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
+# == PROTAGONIST ==========================================
 c_dimList     = [stateDim] + CONFIG.C_ARCHITECTURE + [actionNum]
 a_dimList     = [stateDim] + CONFIG.A_ARCHITECTURE + [actionNum]
 sacAgent = SAC(CONFIG, c_dimList=c_dimList, a_dimList=a_dimList, action_space=eval_env.unwrapped.action_space, disturbance_space=eval_env.unwrapped.disturbance_space)  
@@ -278,12 +280,23 @@ print("We want to use: {}, and Agent uses: {}".format(device, sacAgent.device))
 print("Critic is using cuda: ", next(sacAgent.critic.parameters()).is_cuda)
 
 if script_args.checkpoint is not None:
-    sacAgent.load_checkpoint(script_args.checkpointVal, outFolder, evaluate=True)
-    print(f"Loaded checkpoint from {script_args.checkpoint} at iteration {script_args.checkpointVal}")
-    itr_init = script_args.checkpointVal
-    args.maxUpdates += 1000000
+    # sacAgent.load_checkpoint(script_args.checkpointVal, outFolder, evaluate=True)
+    filePath = os.path.join(outFolder, 'train')
+    trainDict = load_obj(filePath)
+    trainProgress = trainDict['trainProgress']
+    trainingRecords = trainDict['trainRecords']
+    idx         = np.argmax(trainProgress[:, 0]) + 1
+    successRate = np.amax(trainProgress[:, 0])
+    print('We pick model with success rate-{:.3f}'.format(successRate))
+    # CHANGED: ensemble restore saves per-critic with unique prefixes
+    sacAgent.load_checkpoint(idx * args.checkPeriod, outFolder, evaluate=True)
+    print(f"Loaded checkpoint from {script_args.checkpoint} at iteration {idx * args.checkPeriod}")
+    itr_init = args.maxUpdates
+    args.maxUpdates += script_args.numitr
+    trainFolder = chkFolder
 else:
     itr_init = 0
+    trainFolder = outFolder
 
 
 # if args.warmup:
@@ -306,9 +319,9 @@ checkPeriod = args.checkPeriod
 trainRecords, trainProgress = trainer.learn(
     train_envs, eval_env, MAX_UPDATES=args.maxUpdates, MAX_EP_STEPS=args.maxSteps, warmupQ=False,
     doneTerminate=True, vmin=vmin, vmax=vmax, numRndTraj=10000,
-    checkPeriod=checkPeriod, outFolder=outFolder, storeBest=args.storeBest,
-    plotFigure=args.plotFigure, storeFigure=args.storeFigure, 
-    plotTrainValue=args.plotTrainValue, verbose=True, runningCostThr=None, itr_init=itr_init,
+    checkPeriod=checkPeriod, outFolder=trainFolder, storeBest=args.storeBest,
+    plotFigure=args.plotFigure, storeFigure=args.storeFigure, curUpdates=itr_init,
+    plotTrainValue=args.plotTrainValue, verbose=True, runningCostThr=None,
 )
 
 trainDict = {
@@ -358,25 +371,59 @@ if plotFigure or storeFigure:
     plt.close()
 
     # -- restore best checkpoint ------------------------------------------
-    idx         = np.argmax(trainProgress[:, 0]) + 1
-    successRate = np.amax(trainProgress[:, 0])
-    print('We pick model with success rate-{:.3f}'.format(successRate))
-    # CHANGED: ensemble restore saves per-critic with unique prefixes
-    sacAgent.load_checkpoint(args.numEnvs * ((idx * args.checkPeriod + args.numEnvs-1)// args.numEnvs), outFolder, evaluate=True)
+    best_dir = os.path.join(trainFolder, "best_models")
+    if os.path.isdir(best_dir):
+
+        sacAgent.load_best_models(best_dir, evaluate=True)
+    else:
+
+        idx         = np.argmax(trainProgress[:, 0]) + 1
+        successRate = np.amax(trainProgress[:, 0])
+        print('We pick model with success rate-{:.3f}'.format(successRate))
+        # CHANGED: ensemble restore saves per-critic with unique prefixes
+        if script_args.checkpoint is not None:
+            chk_bias = args.maxUpdates - script_args.numitr
+        else:
+            chk_bias = 0
+        best_iter = (args.numEnvs * ((idx * args.checkPeriod + args.numEnvs - 1) // args.numEnvs)) + chk_bias
+        sacAgent.load_checkpoint(best_iter, trainFolder, evaluate=True)
+
+        # Save only the best models(for GitHub)
+        os.makedirs(best_dir, exist_ok=True)
+
+        torch.save(
+            sacAgent.protagonist.state_dict(),
+            os.path.join(best_dir, "protagonist.pt")
+        )
+
+        torch.save(
+            sacAgent.adversary.state_dict(),
+            os.path.join(best_dir, "adversary.pt")
+        )
+
+        for i, critic in enumerate(sacAgent.critics):
+            torch.save(
+                critic.state_dict(),
+                os.path.join(best_dir, f"critic_{i}.pt")
+            )
+
 
     # -- grid rollout eval (identical to sim_new_point_mass.py) -----------
-    nx = 41 
-    ny = 121
+    nx = 201 
+    ny = 201
     xs = np.linspace(eval_env.unwrapped.bounds[0, 0], eval_env.unwrapped.bounds[0, 1], nx)
     ys = np.linspace(eval_env.unwrapped.bounds[1, 0], eval_env.unwrapped.bounds[1, 1], ny)
     na = eval_env.unwrapped.action_space.shape[0]
     nd = eval_env.unwrapped.disturbance_space.shape[0]
 
     N = nx * ny
-    states = np.array([
-                np.concatenate([np.array([xs[i], ys[j], 0, 0]), eval_env.unwrapped.obs_list])
-                for i in range(nx) for j in range(ny)
-            ])
+    states = np.array([[xs[i], ys[j], 0, 0] for i in range(nx) for j in range(ny)])
+
+    x_t, y_t = eval_env.unwrapped.target_x_y_w_h[0, 0] - states[:, 0], eval_env.unwrapped.target_x_y_w_h[0, 1] - states[:, 1] # relative position to the target
+    observations = np.column_stack([x_t, y_t, states[:, 2], states[:, 3]]) # relative position + theta + v
+    for constraint_set in eval_env.unwrapped.obstacles:
+        dir_x, dir_y, g_x_i = calculate_margin_circle(states[:, :2], constraint_set, negativeInside=False)
+        observations = np.column_stack([observations, dir_x, dir_y, g_x_i])    
 
     state_hist, results, values, control_hist = eval_env.unwrapped.simulate_all_trajectories(sacAgent, states, N, T=250, toEnd=False)
 
@@ -387,20 +434,19 @@ if plotFigure or storeFigure:
     varMtx         = np.empty((nx, ny))
     disAgreeMtx    = np.empty((nx, ny))
 
-    stateTensor  = torch.FloatTensor(states).to(device).unsqueeze(0)
-    # stateTensor = torch.concatenate([stateTensor, sacAgent.obstaclesTensor.repeat(stateTensor.shape[0], 1)], dim=1)  # (nx*ny, state_dim + obs_dim)
+    observationTensor  = torch.FloatTensor(observations).to(device).unsqueeze(0)
 
-    _, _, action = sacAgent.protagonist.sample(stateTensor)
-    _, _, disturbance = sacAgent.adversary.sample(stateTensor)
+    _, _, action = sacAgent.protagonist.sample(observationTensor)
+    _, _, disturbance = sacAgent.adversary.sample(observationTensor)
 
     actDistMtx = action.cpu().detach().numpy().reshape(nx, ny, na)
     disturbDistMtx = disturbance.cpu().detach().numpy().reshape(nx, ny, nd)
 
-    unc = sacAgent.get_uncertainty(stateTensor.squeeze(0), action.squeeze(0), disturbance.squeeze(0))
+    unc = sacAgent.get_uncertainty(observationTensor.squeeze(0), action.squeeze(0), disturbance.squeeze(0))
     varMtx = unc["epistemic_uncertainty"].cpu().detach().numpy().reshape(nx, ny)
     disAgreeMtx = unc["safe_disagreement"].cpu().detach().numpy().reshape(nx,ny)
 
-    g_x_val = eval_env.unwrapped.safety_margin_batch(states[:,:2])
+    g_x_val = eval_env.unwrapped.safety_margin(states[:,:2])
     analytic_max_fail = (g_x_val > 0).sum()
 
     resultMtx = results.reshape(nx, ny)
@@ -429,11 +475,12 @@ if plotFigure or storeFigure:
     sacAgent.plot_uncertainty_maps(
         eval_env,
         out_folder=figureFolder,
-        nx=41, ny=ny,
+        nx=201, ny=201,
         vmin=vmin, vmax=vmax,
         idx = idx * args.checkPeriod,
         store=storeFigure,
         show=plotFigure,
+        success = (resultMtx == 1).sum() / (nx * ny)
     )
 
     # -- ADDED: uncertainty overlay on rollout grid -----------------------
@@ -443,7 +490,7 @@ if plotFigure or storeFigure:
     ax = axes[0]
     im = ax.imshow(
         varMtx.T, interpolation='none', extent=axStyle[0],
-        origin='lower', cmap='YlOrRd', zorder=-1,
+        origin='lower', cmap='YlOrRd', zorder=-1, vmax=3,
     )
     fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05, shrink=.95)
     ax.set_title(r'Epistemic Uncertainty  Var$_k[Q]$', fontsize=14)

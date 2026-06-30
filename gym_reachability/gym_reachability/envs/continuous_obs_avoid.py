@@ -4,7 +4,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import torch
 import random
-from .env_utils import calculate_margin_rect, calculate_margin_circle, calculate_margin_circle_batch, calculate_margin_rect_batch
+from .env_utils import calculate_margin_rect, calculate_margin_circle #, calculate_margin_rect_batch #, calculate_margin_circle_batch
 
 from matplotlib.collections import LineCollection
 import matplotlib.cm as cm
@@ -35,7 +35,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         
         self.config = config
         self.mode = mode
-        self.bounds = np.array([[0, 6.88], [0, 11.0], [-np.pi, np.pi], [-2, 2]]) # x, y, theta, v
+        self.bounds = np.array([[-3, 9.88], [-3, 14.0], [-np.pi, np.pi], [-2, 2]]) # x, y, theta, v
         self.low = self.bounds[:, 0]
         self.high = self.bounds[:, 1]
         self.sample_inside_obs = sample_inside_obs
@@ -48,35 +48,36 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         self.add_obs = self.config.addObs
 
+        # Set random seed.
+        self.set_seed(self.config.randomSeed)
+
         # Get obstacles
-        self.randomiseObstacles(self.bounds, num_obstacles=self.config.numObstacles)
+        # self.randomiseObstacles(self.bounds, num_obstacles=self.config.numObstacles)
 
-        self.obstaclesTensor = torch.hstack([torch.hstack((torch.tensor(v), torch.tensor(s))) for v, s in self.obstacles]).to(device)
 
-        self.state = np.concatenate([np.zeros(4), self.obs_list]) # x, y, theta , v + obstacles
-        self.obs_high = np.concatenate([np.array([6.88, 11.0, np.pi, 2], dtype=np.float32), np.full(self.obs_list.shape[0], np.inf, dtype=np.float32)]) # x, y, theta, v
-        self.obs_low = np.concatenate([np.array([0.0, 0.0, -np.pi, -2], dtype=np.float32), np.full(self.obs_list.shape[0], -np.inf, dtype=np.float32)]) # x, y, theta, 2
+        self.state = np.zeros(4) # x, y, theta , v
+        self.state_high = np.array([self.bounds[0, 1], self.bounds[1, 1], np.pi, 2]) # x, y, theta, v
+        self.state_low = np.array([self.bounds[0, 0], self.bounds[1, 0], -np.pi, -2]) # x, y, theta, v
+
         self.act_bound = np.array([2.0, 2.0]).T # a, a_w
         self.d_bound = np.array([0.5, 0.5]).T # d_a, d_w
         self.act_dim = self.act_bound.shape[0]
-        self.obs_dim = self.obs_high.shape[0]
+        self.state_dim = self.state_high.shape[0]
+        self.obs_dim = self.state.shape[0] + 3 * self.config.numObstacles
 
-        self.midpoint = (self.obs_low[0:2] + self.obs_high[0:2]) / 2.0
-        self.interval = self.obs_high[0:2] - self.obs_low[0:2]
+        self.midpoint = (self.state_low[0:2] + self.state_high[0:2]) / 2.0
+        self.interval = self.state_high[0:2] - self.state_low[0:2]
 
         # Define action and observation space
         self.action_space = gymnasium.spaces.Box(low=-np.ones((self.act_dim,), dtype=np.float32), high=np.ones((self.act_dim,), dtype=np.float32), shape=(self.act_dim,))
         self.disturbance_space = gymnasium.spaces.Box(low=-np.ones((self.act_dim,), dtype=np.float32), high=np.ones((self.act_dim,), dtype=np.float32), shape=(self.act_dim,))
-        self.observation_space = gymnasium.spaces.Box(low=self.obs_low, high=self.obs_high, shape=(self.obs_dim,))
-        
+        self.observation_space = gymnasium.spaces.Box(low=np.full((self.obs_dim,), -np.inf, dtype=np.float32), high=np.full((self.obs_dim,), np.inf, dtype=np.float32), shape=(self.obs_dim,))
+        self.state_space = gymnasium.spaces.Box(low=self.state_low, high=self.state_high, shape=(self.state_dim,))
+
         self.viewer = None
 
         # Define the bounds of the robot (x, y, w, h)
         self.robot_bounds = np.array([self.state[0], self.state[1], 0.5, 0.7])  # x, y, w, h
-
-        # Set random seed.
-        self.seed_val = 0
-        self.set_seed(self.seed_val)
 
         # Cost Parameters
         self.penalty = 1.
@@ -97,7 +98,6 @@ class ContinuousObsAvoidEnv(gym.Env):
             np.array([5.5, 0.5, 0, 0]),
         ]
         
-
         print(
             "Env: mode-{:s}; doneType-{:s}; sample_inside_obs-{}".format(
                 self.mode, self.doneType, self.sample_inside_obs
@@ -123,9 +123,15 @@ class ContinuousObsAvoidEnv(gym.Env):
         else:
             self.state = start
 
+        x_t, y_t = self.target_x_y_w_h[0, 0] - self.state[0], self.target_x_y_w_h[0, 1] - self.state[1] # relative position to the target
+        self.observation = np.array([x_t, y_t, self.state[2], self.state[3]]) # relative position + theta + v
+        for constraint_set in self.obstacles:
+            dir_x, dir_y, g_x_i = calculate_margin_circle(self.state[None, :2], constraint_set, negativeInside=False)
+            self.observation = np.concatenate([self.observation, dir_x, dir_y, g_x_i])
+
         super().reset(seed=seed)
         info = {}
-        return np.asarray(self.state, dtype=np.float32), info
+        return np.asarray(self.observation, dtype=np.float32), info
 
     def sample_random_state(self, sample_inside_obs=False):
         """Picks the state uniformly at random.
@@ -143,9 +149,8 @@ class ContinuousObsAvoidEnv(gym.Env):
         inside_obs = True
         # Repeat sampling until outside obstacle if needed.
         while inside_obs:
-            sample_state = self.observation_space.sample()
+            sample_state = self.state_space.sample()
             xy_sample = sample_state[:2]
-            sample_state[4:] = self.obs_list
 
             g_x = self.safety_margin(xy_sample)
             inside_obs = (g_x > 0)
@@ -163,7 +168,8 @@ class ContinuousObsAvoidEnv(gym.Env):
             obs_size_range (tuple of floats, optional): range of the width and
                 height of the obstacles. Defaults to (0.5, 1.5).
         """
-        random.seed(0)
+        if self.config.randomSeed is not None:
+            random.seed(self.config.randomSeed)
         x_lim = bounds[0,:]
         y_lim = bounds[1,:]
 
@@ -185,7 +191,7 @@ class ContinuousObsAvoidEnv(gym.Env):
                 (obs_center_x, obs_center_y), _ = obs
 
                 # check if the obstacle is within 3r of any existing obstacle (make it easier to get through obs)
-                if (abs(center_x - obs_center_x) < 3*radius) and (abs(center_y - obs_center_y) < 3*radius):
+                if (abs(center_x - obs_center_x) < 5*radius) and (abs(center_y - obs_center_y) < 5*radius):
                     overlap = True
                     break
                 
@@ -202,14 +208,6 @@ class ContinuousObsAvoidEnv(gym.Env):
             if not overlap:
                 self.obstacles.append((np.array([center_x, center_y]), radius))
                 count += 1
-            
-        if self.add_obs:
-            self.obs_list = np.concatenate([
-                np.concatenate([center.flatten(), np.array([radius], dtype=np.float32)])
-                for center, radius in self.obstacles
-            ])
-        else:
-            self.obs_list = np.array([], dtype=np.float32)
 
     # == Setting Hyper-Parameters ==
     def set_costParam(
@@ -239,14 +237,17 @@ class ContinuousObsAvoidEnv(gym.Env):
         Args:
             seed (int): seed value.
         """
-        self.seed_val = seed
-        np.random.seed(self.seed_val)
-        torch.manual_seed(self.seed_val)
-        torch.cuda.manual_seed(self.seed_val)
-        torch.cuda.manual_seed_all(self.seed_val)  # if using multi-GPU.
-        random.seed(self.seed_val)
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
+        if seed is None:
+            return
+        else:
+            self.seed_val = seed
+            np.random.seed(self.seed_val)
+            torch.manual_seed(self.seed_val)
+            torch.cuda.manual_seed(self.seed_val)
+            torch.cuda.manual_seed_all(self.seed_val)  # if using multi-GPU.
+            random.seed(self.seed_val)
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
 
 
     def get_target_set_boundary(self):
@@ -283,21 +284,31 @@ class ContinuousObsAvoidEnv(gym.Env):
             float: postivive numbers indicate being inside the failure set (safety
                 violation).
         """
+
+        s = np.asarray(s)
+
+        single = False
+        if s.ndim == 1:
+            s = s[None, :]
+            single = True
+
+        positions = s[:, :2]
+
         g_x_list = []
 
-        # constraint_set_safety_margin
-        for _, constraint_set in enumerate(self.obstacles):
-            g_x = calculate_margin_circle(s, constraint_set, negativeInside=False)
+        for constraint_set in self.obstacles:
+            _, _, g_x = calculate_margin_circle(positions, constraint_set, negativeInside=False)
             g_x_list.append(g_x)
 
-        # enclosure_safety_margin
         boundary_x_y_w_h = np.append(self.midpoint, self.interval)
-        g_x = calculate_margin_rect(s, boundary_x_y_w_h, negativeInside=True)
+        g_x = calculate_margin_rect(positions, boundary_x_y_w_h, negativeInside=True)
         g_x_list.append(g_x)
 
-        safety_margin = np.max(np.array(g_x_list))
+        safety_margin = np.max(np.stack(g_x_list, axis=0), axis=0)
 
-        return self.scaling * safety_margin
+        out = self.scaling * safety_margin
+
+        return out[0] if single else out
 
     def target_margin(self, s):
         """Computes the margin (e.g. distance) between the state and the target set.
@@ -309,38 +320,27 @@ class ContinuousObsAvoidEnv(gym.Env):
             float: negative numbers indicate reaching the target. If the target set
                 is not specified, return None.
         """
+
+        s = np.asarray(s)
+
+        single = False
+        if s.ndim == 1:
+            s = s[None, :]
+            single = True
+
+        positions = s[:, :2]
+
         l_x_list = []
 
-        # target_set_safety_margin
-        for _, target_set in enumerate(self.target_x_y_w_h):
-            l_x = calculate_margin_rect(s, target_set, negativeInside=True)
-            l_x_list.append(l_x)
-
-        target_margin = np.max(np.array(l_x_list))
-
-        return self.scaling * target_margin
-
-    def safety_margin_batch(self, positions):
-        """positions: (N, 2) → (N,)"""
-        g_x_list = []
-        for constraint_set in self.obstacles:
-            g_x = calculate_margin_circle_batch(positions, constraint_set, negativeInside=False)  # (N,)
-            g_x_list.append(g_x)
-
-        boundary = np.append(self.midpoint, self.interval)
-        g_x = calculate_margin_rect_batch(positions, boundary, negativeInside=True)  # (N,)
-        g_x_list.append(g_x)
-
-        return self.scaling * np.max(np.stack(g_x_list, axis=0), axis=0)  # (N,)
-
-    def target_margin_batch(self, positions):
-        """positions: (N, 2) → (N,)"""
-        l_x_list = []
         for target_set in self.target_x_y_w_h:
-            l_x = calculate_margin_rect_batch(positions, target_set, negativeInside=True)  # (N,)
+            l_x = calculate_margin_rect(positions, target_set, negativeInside=True)
             l_x_list.append(l_x)
 
-        return self.scaling * np.max(np.stack(l_x_list, axis=0), axis=0)  # (N,)
+        target_margin = np.max(np.stack(l_x_list, axis=0), axis=0)
+
+        out = self.scaling * target_margin
+
+        return out[0] if single else out
     
     # == Getting Information ==
     def check_within_env(self, state):
@@ -382,6 +382,12 @@ class ContinuousObsAvoidEnv(gym.Env):
         # g_x:     {g_x}""")
         self.state = state
 
+        x_t, y_t = self.target_x_y_w_h[0, 0] - self.state[0], self.target_x_y_w_h[0, 1] - self.state[1] # relative position to the target
+        self.observation = np.array([x_t, y_t, self.state[2], self.state[3]]) # relative position + theta + v
+        for constraint_set in self.obstacles:
+            dir_x, dir_y, g_x_i = calculate_margin_circle(self.state[None, :2], constraint_set, negativeInside=False)
+            self.observation = np.concatenate([self.observation, dir_x, dir_y, g_x_i])
+
         fail = g_x > 0
         success = l_x <= 0
 
@@ -418,7 +424,7 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         truncated = False # don't use truncated but added for Gym API
 
-        return np.asarray(self.state, dtype=np.float32), cost, done, truncated, info
+        return np.asarray(self.observation, dtype=np.float32), cost, done, truncated, info
 
     def integrate_forward(self, state, u):
         """Integrates the dynamics forward by one step.
@@ -487,7 +493,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         ])
         return [axes, aspect_ratio]
 
-    def get_value(self, sacAgent, nx=71, ny=121, addBias=False):
+    def get_value(self, sacAgent, nx=201, ny=201, addBias=False):
         """Gets the state values given the Q-network.
 
         Args:
@@ -512,20 +518,25 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         # Build full state batch — shape (nx*ny, state_dim)
         zeros      = np.zeros((nx * ny, 2))
-        obs_tiled  = np.tile(self.obs_list, (nx * ny, 1))
         xy         = np.stack([grid_x_flat, grid_y_flat], axis=1)
-        states_np  = np.concatenate([xy, zeros, obs_tiled], axis=1)  # (nx*ny, state_dim)
+        states_np  = np.concatenate([xy, zeros], axis=1)  # (nx*ny, state_dim)
 
-        states = torch.FloatTensor(states_np).to(self.device)  # (nx*ny, state_dim)
+        x_t, y_t = self.target_x_y_w_h[0, 0] - states_np[:, 0], self.target_x_y_w_h[0, 1] - states_np[:, 1] # relative position to the target
+        observations_np = np.column_stack([x_t, y_t, states_np[:, 2], states_np[:, 3]]) # relative position + theta + v
+        for constraint_set in self.obstacles:
+            dir_x, dir_y, g_x_i = calculate_margin_circle(states_np[:, :2], constraint_set, negativeInside=False)
+            observations_np = np.column_stack([observations_np, dir_x, dir_y, g_x_i])
+
+        observations = torch.FloatTensor(observations_np).to(self.device)  # (nx*ny, state_dim)
 
         with torch.no_grad():
             if self.mode in ('normal', 'RA') or (self.mode == 'AARA' and sacAgent is None):
                 action      = torch.zeros(nx * ny, self.action_dim, device=self.device)
                 disturbance = torch.zeros(nx * ny, self.dist_dim,   device=self.device)
             elif self.mode == 'AARA' and sacAgent is not None:
-                _, _, action      = sacAgent.protagonist.sample(states)  # (nx*ny, action_dim)
-                _, _, disturbance = sacAgent.adversary.sample(states)    # (nx*ny, dist_dim)
-            values = sacAgent.Q_network(states, action, disturbance)     # (nx*ny,)
+                _, _, action      = sacAgent.protagonist.sample(observations)  # (nx*ny, action_dim)
+                _, _, disturbance = sacAgent.adversary.sample(observations)    # (nx*ny, dist_dim)
+            values = sacAgent.Q_network(observations, action, disturbance)     # (nx*ny,)
 
         v = values.cpu().numpy().reshape(nx, ny)
 
@@ -572,17 +583,23 @@ class ContinuousObsAvoidEnv(gym.Env):
         result = 0  # not finished
 
         for _ in range(T):
-            if self.safety_margin(state[:2]) > 0: 
+            if self.safety_margin(state[:2]) > 0:
                 result = -1  # failed
                 break
             elif self.target_margin(state[:2]) <= 0:
                 result = 1  # succeeded
                 break
 
-            state_tensor = torch.FloatTensor(state)
-            state_tensor = state_tensor.to(self.device).unsqueeze(0)
-            _, _, action =  protagonist.sample(state_tensor) # deterministic action
-            _, _, disturb = adversary.sample(state_tensor) # deterministic disturbance
+            x_t, y_t = self.target_x_y_w_h[0, 0] - state[0], self.target_x_y_w_h[0, 1] - state[1] # relative position to the target
+            observations_np = np.column_stack([x_t, y_t, state[2], state[3]]) # relative position + theta + v
+            for constraint_set in self.obstacles:
+                dir_x, dir_y, g_x_i = calculate_margin_circle(state[None, :2], constraint_set, negativeInside=False)
+                observations_np = np.column_stack([observations_np, dir_x, dir_y, g_x_i])
+
+            observations = torch.FloatTensor(observations_np).to(self.device).unsqueeze(0)
+            
+            _, _, action =  protagonist.sample(observations) # deterministic action
+            _, _, disturb = adversary.sample(observations) # deterministic disturbance
 
             action = action.cpu().detach().numpy()[0] * self.act_bound
             disturb = disturb.cpu().detach().numpy()[0] * self.d_bound
@@ -594,7 +611,7 @@ class ContinuousObsAvoidEnv(gym.Env):
             value = max(l_x, g_x)
             traj_val.append(value)
 
-            state, _ = self.integrate_forward(state, u_tot)
+            state, _ = self.integrate_forward(state, u_tot.squeeze())
 
             state_traj.append(state)
             control_traj.append(action)
@@ -632,14 +649,13 @@ class ContinuousObsAvoidEnv(gym.Env):
         values = []
 
         if states is None:
-            nx, ny = 41, 100
+            nx, ny = 101, 101
             xs = np.linspace(self.bounds[0, 0], self.bounds[0, 1], nx)
             ys = np.linspace(self.bounds[1, 0], self.bounds[1, 1], ny)
             N = nx * ny
 
             # All starting states at once: (N, state_dim)
-            states = np.array([
-                np.concatenate([np.array([xs[i], ys[j], 0, 0]), self.obs_list])
+            states = np.array([np.array([xs[i], ys[j], 0, 0])
                 for i in range(nx) for j in range(ny)
             ])
 
@@ -677,8 +693,8 @@ class ContinuousObsAvoidEnv(gym.Env):
         for t in range(T):
             positions = states[:, :2].cpu().numpy()
 
-            safety = self.safety_margin_batch(positions)
-            target = self.target_margin_batch(positions)
+            safety = self.safety_margin(positions)
+            target = self.target_margin(positions)
 
             results[(~done) & (safety > 0)] = -1
             results[(~done) & (target <= 0)] = 1
@@ -688,11 +704,18 @@ class ContinuousObsAvoidEnv(gym.Env):
 
             active      = ~done
             active_idx  = np.where(active)[0]
-            active_states_t = states[active].to(self.device)
+            active_states_t = states[active].cpu().numpy()
+
+            x_t, y_t = self.target_x_y_w_h[0, 0] - active_states_t[:, 0], self.target_x_y_w_h[0, 1] - active_states_t[:, 1] # relative position to the target
+            observations = np.column_stack([x_t, y_t, active_states_t[:, 2], active_states_t[:, 3]]) # relative position + theta + v
+            for constraint_set in self.obstacles:
+                dir_x, dir_y, g_x_i = calculate_margin_circle(active_states_t[:, :2], constraint_set, negativeInside=False)
+                observations = np.column_stack([observations, dir_x, dir_y, g_x_i])
+            observations = torch.FloatTensor(observations).to(self.device)
 
             with torch.no_grad():
-                _, _, actions = protagonist.sample(active_states_t)
-                _, _, disturbs = adversary.sample(active_states_t)
+                _, _, actions = protagonist.sample(observations)
+                _, _, disturbs = adversary.sample(observations)
 
             u_tot      = (actions.cpu().numpy()  * self.act_bound
                         + disturbs.cpu().numpy() * self.d_bound)   # (n_active, action_dim)
@@ -757,7 +780,7 @@ class ContinuousObsAvoidEnv(gym.Env):
 
         # == Plot Trajectories ==
         _, state_hist, control_hist = self.plot_trajectories(
-            sacAgent, T=self.config.maxSteps, states=[np.concatenate([arr, self.obs_list]) for arr in self.visual_initial_states], toEnd=False, ax=ax[0], controls=True
+            sacAgent, T=self.config.maxSteps, states= self.visual_initial_states, toEnd=False, ax=ax[0], controls=True
         )
 
         # == Plot State and Control Trajectories ==

@@ -80,6 +80,8 @@ if env_name =="zermelo_show-v0":
     env_title = "point-mass" 
 elif env_name == "one_player_reach_avoid_lunar_lander":
     env_title = "lunar-lander"
+elif env_name == "abv-v0":
+    env_title = "abv"
 
 updatePeriod = int(args.maxUpdates / args.updateTimes)
                            
@@ -171,7 +173,7 @@ if plotFigure or storeFigure:
         ax.set_title(title, fontsize=18)
         env.unwrapped.plot_target_failure_set(ax=ax)
         env.unwrapped.plot_formatting(ax=ax)
-    env.unwrapped.plot_reach_avoid_set(axes[2])
+    # env.unwrapped.plot_reach_avoid_set(axes[2])
     fig.tight_layout()
     if storeFigure:
         fig.savefig(os.path.join(figureFolder, 'env.png'))
@@ -187,13 +189,15 @@ print("\n== Agent Information ==")
 # New fields SELECT_WORST_Q, FIND_MAX_Q, SIM_MAX_Q match updated dqnConfig
 PRO_CONFIG = ceConfig(
     DEVICE=device, 
-    ENV_NAME=env_name, 
+    ENV_NAME=env_name,
+    NUM_ENVS = 1, 
     SEED=args.randomSeed,
     MAX_UPDATES=args.maxUpdates, 
     MAX_EP_STEPS=args.maxSteps,
     BATCH_SIZE=args.batchSize,
     MEMORY_CAPACITY=args.memoryCapacity, 
-    ARCHITECTURE=args.architecture,
+    A_ARCHITECTURE=args.architecture,
+    C_ARCHITECTURE=args.architecture,
     ACTIVATION=args.actType, 
     # =================== LEARNING RATE .
     GAMMA=args.gamma, 
@@ -233,7 +237,7 @@ trainer = Trainer(PRO_CONFIG)
 
 # == PROTAGONIST — DDQNEnsemble ==========================================
 # CHANGED: DDQNSingle → DDQNEnsemble; dimList and call signature identical
-dimList     = [stateDim] + PRO_CONFIG.ARCHITECTURE + [actionNum]
+dimList     = [stateDim] + PRO_CONFIG.A_ARCHITECTURE + [actionNum]
 protagonist = DDQNEnsemble(
     PRO_CONFIG, actionNum, trainer.memory,
     dimList=dimList, mode=agentMode, terminalType=args.terminalType,
@@ -369,7 +373,7 @@ if plotFigure or storeFigure:
         idx_cell = it.multi_index
         print(idx_cell, end='\r')
         x, y  = xs[idx_cell[0]], ys[idx_cell[1]]
-        state = np.array([x, y])
+        state = np.array([x, y, 0 ,0 ,0])
 
         stateTensor  = torch.FloatTensor(state).to(device).unsqueeze(0)
         action_index = protagonist.Q_network(stateTensor).min(dim=1)[1].cpu().item()

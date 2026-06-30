@@ -54,3 +54,8 @@ register(
     id="cont-obs-avoid-v0",
     entry_point="gym_reachability.gym_reachability.envs:ContinuousObsAvoidEnv"
 )
+
+register(
+    id="abv-v0",
+    entry_point="gym_reachability.gym_reachability.envs:ABVEnv"
+)

@@ -266,7 +266,7 @@ class StepResetLR(_scheduler):
 
 # ==== SAC Networks ====
 
-def build_mlp(dimList, activation):
+def build_mlp(dimList, activation, layernorm=False):
     act_map = {
         "Sin":  Sin(),
         "Tanh": nn.Tanh(),
@@ -279,6 +279,8 @@ def build_mlp(dimList, activation):
     numLayer = len(dimList) - 1
     for idx in range(numLayer):
         layers.append(nn.Linear(dimList[idx], dimList[idx + 1]))
+        if layernorm:
+            layers.append(nn.LayerNorm(dimList[idx + 1]))
         if idx < numLayer - 1:          # no activation after final layer
             layers.append(act_map[activation])
 
@@ -313,8 +315,8 @@ class QNetwork(nn.Module):
         sa_dimList[-1] = 1  # output is Q-value
         print("QNetwork dimList:", sa_dimList)
 
-        self.q_head1 = build_mlp(sa_dimList, self.actType)
-        self.q_head2 = build_mlp(sa_dimList, self.actType)
+        self.q_head1 = build_mlp(sa_dimList, self.actType, layernorm=False)
+        self.q_head2 = build_mlp(sa_dimList, self.actType, layernorm=False)
 
         self.apply(weights_init_)
 

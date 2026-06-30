@@ -28,6 +28,7 @@ from .utils import soft_update, hard_update, save_model
 from .model import GaussianPolicy, QNetwork, DeterministicPolicy, StepLRMargin, StepResetLR
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib.pyplot as plt
+from gym_reachability.gym_reachability.envs.env_utils import calculate_margin_circle
 
 from collections import namedtuple
 Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "done", "info"])
@@ -119,9 +120,10 @@ class SAC(object):
         # ----------------------------------------------------------------
         self.critics: List[QNetwork] = []
         self.critic_optimisers: List[optim.AdamW] = []
-        self.schedulers: List [optim.lr_scheduler.StepLR] = []
+        self.critic_schedulers: List [optim.lr_scheduler.StepLR] = []
         self.critic_targets: List[QNetwork] = []
-
+        if config.SEED is None: 
+            config.SEED = 0
         for i in range(self.num_critics):
             cfg_i = copy.deepcopy(config)
             cfg_i.SEED += i
@@ -139,7 +141,7 @@ class SAC(object):
             self.scheduler = optim.lr_scheduler.StepLR(
                 self.critic_optim, step_size=self.LR_C_PERIOD, gamma=self.LR_C_DECAY
             )
-            self.schedulers.append(self.scheduler)
+            self.critic_schedulers.append(self.scheduler)
 
             self.critic_target = QNetwork(config, self.c_dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
             hard_update(self.critic_target, self.critic)
@@ -321,10 +323,16 @@ class SAC(object):
 
         for ix, x in enumerate(xs):
             for iy, y in enumerate(ys):
-                st = torch.FloatTensor([x, y, 0, 0]).unsqueeze(0).to(self.device)
-                _, _, control = self.protagonist.sample(st)
-                _, _, disturbance = self.adversary.sample(st)
-                m  = self.get_uncertainty(st, control, disturbance)
+                states = np.array([x, y, 0, 0])
+                x_t, y_t = env.unwrapped.target_x_y_w_h[0, 0] - states[0], env.unwrapped.target_x_y_w_h[0, 1] - states[1] # relative position to the target
+                observations = np.column_stack([x_t, y_t, states[2], states[3]]) # relative position + theta + v
+                for constraint_set in env.unwrapped.obstacles:
+                    dir_x, dir_y, g_x_i = calculate_margin_circle(states[None, :2], constraint_set, negativeInside=False)
+                    observations = np.column_stack([observations, dir_x, dir_y, g_x_i])
+                observations = torch.Tensor(observations).to(self.device)
+                _, _, control = self.protagonist.sample(observations)
+                _, _, disturbance = self.adversary.sample(observations)
+                m  = self.get_uncertainty(observations, control, disturbance)
                 out["mean_v"]              [ix, iy] = m["mean_q"].min().item()
                 out["var_v"]               [ix, iy] = m["var_q"].min(dim=-1).values.item()
                 out["std_v"]               [ix, iy] = m["std_q"].min(dim=-1).values.item()
@@ -346,6 +354,7 @@ class SAC(object):
         idx: int = 0,
         store: bool = True,
         show:  bool = False,
+        success: float = None,
     ) -> None:
         """
         4-panel figure:
@@ -359,7 +368,7 @@ class SAC(object):
         panels = [
             ("mean_v",               "seismic",  vmin,  vmax, r"Mean $\hat{V}$ (ensemble avg)"),
             ("min_v",                "seismic",  vmin,  vmax, r"Conservative $\hat{V}$ (min critic)"),
-            ("epistemic_uncertainty","YlOrRd",   None,  None, r"Epistemic Uncertainty  Var$_k[Q]$"),
+            ("epistemic_uncertainty","YlOrRd",   0,     1,    r"Epistemic Uncertainty  Var$_k[Q]$"),
             ("safe_disagreement",    "PuRd",     0,     1,    "Safe / Unsafe Disagreement"),
         ]
 
@@ -381,7 +390,7 @@ class SAC(object):
                            colors='k', linewidths=2, linestyles='dashed')
 
         fig.suptitle(
-            f"Protagonist Ensemble  ({self.num_critics} critics | seed diversification | @ update {idx})",
+            f"Protagonist Ensemble  ({self.num_critics} critics | seed diversification | @ update {idx} | success rate {success:.2%})",
             fontsize=13,
         )
         fig.tight_layout()
@@ -394,7 +403,7 @@ class SAC(object):
             plt.show()
         plt.close(fig)
 
-    def critic_update(self, critic, critic_optim, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, ep_unc=None):
+    def critic_update(self, critic, critic_target, critic_optim, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, ep_unc=None):
 
         # ----------------------------------------------------------------
         # 1.  Critic update (reach-avoid Bellman target)
@@ -410,7 +419,7 @@ class SAC(object):
         with torch.no_grad():
             next_action, next_log_pi_a, _ = self.protagonist.sample(non_final_state_nxt)
             next_disturb, next_log_pi_d, _ = self.adversary.sample(non_final_state_nxt)
-            qf1_next, qf2_next = self.critic_target(non_final_state_nxt, next_action, next_disturb)
+            qf1_next, qf2_next = critic_target(non_final_state_nxt, next_action, next_disturb)
             # protagonist minimises → take the minimum of the two Q-heads
         max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
 
@@ -437,6 +446,7 @@ class SAC(object):
 
         critic_optim.zero_grad()
         qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
         critic_optim.step()
 
         return qf1_loss, qf2_loss
@@ -484,8 +494,8 @@ class SAC(object):
         self.epistem_uncertainty = self.get_uncertainty(state, action, disturbance)["epistemic_uncertainty"]
 
         futures = {
-            self._executor.submit(self.critic_update, c, c_opt, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, self.epistem_uncertainty): c
-            for c, c_opt in zip(self.critics, self.critic_optimisers)
+            self._executor.submit(self.critic_update, c, c_t, c_opt, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, self.epistem_uncertainty): c
+            for c, c_t, c_opt in zip(self.critics, self.critic_targets, self.critic_optimisers)
         }
 
         losses = []
@@ -615,6 +625,18 @@ class SAC(object):
         
         self.Q_network = MaxEnsembleNet([c for c in self.critics])
 
+    def load_best_models(self, bestDir, evaluate=True):
+        self.protagonist.load_state_dict(torch.load(os.path.join(bestDir, "protagonist.pt"),map_location=self.device))
+        self.adversary.load_state_dict(torch.load(os.path.join(bestDir, "adversary.pt"),map_location=self.device))
+        for i, critic in enumerate(self.critics):
+            critic.load_state_dict(torch.load(os.path.join(bestDir, f"critic_{i}.pt"), map_location=self.device))
+        
+        mode = "eval" if evaluate else "train"
+        for net in [self.protagonist, self.adversary, self.critic]:
+            getattr(net, mode)()
+        
+        self.Q_network = MaxEnsembleNet([c for c in self.critics])
+
     # ------------------------------------------------------------------
     # Update Hyperparameters
     # ------------------------------------------------------------------
@@ -626,12 +648,13 @@ class SAC(object):
         """
         lr = self.critic_optim.state_dict()["param_groups"][0]["lr"]
         if (lr <= self.LR_C_END):
-            for param_group in self.critic_optim.param_groups:
-                param_group["lr"] = self.LR_C_END
+            for critic_optim in self.critic_optimisers:
+                for param_group in critic_optim.param_groups:
+                    param_group["lr"] = self.LR_C_END
         else:
             self.scheduler.step()
-            self.protagonist_scheduler.step()
-            self.adversary_scheduler.step()
+        self.protagonist_scheduler.step()
+        self.adversary_scheduler.step()
 
         self.GammaScheduler.step()
         self.GAMMA = self.GammaScheduler.get_variable()

@@ -22,7 +22,7 @@ import os
 import pickle
 
 from .model import StepLRMargin, StepResetLR
-from .ReplayMemory import ReplayMemory
+from .QReplayMemory import QReplayMemory
 from .utils import soft_update, save_model
 
 Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "info"])
@@ -46,7 +46,7 @@ class DDQN(abc.ABC):
     """
     self.CONFIG = CONFIG
     self.saved = False
-    self.memory = ReplayMemory(CONFIG.MEMORY_CAPACITY)
+    self.memory = QReplayMemory(CONFIG.MEMORY_CAPACITY)
 
     # == PARAM ==
     # Exploration-exploitation tradeoff.
