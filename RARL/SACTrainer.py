@@ -245,7 +245,7 @@ class SACTrainer:
                 trainProgress.append([success, failure, unfinish])
 
                 if verbose:
-                    pro_lr = self.agent.critic_optim.state_dict(
+                    pro_lr = self.agent.critic_optimisers[0].state_dict(
                     )["param_groups"][0]["lr"]
                     print("\nAfter [{:d}] updates:".format(cntUpdate))
                     print(

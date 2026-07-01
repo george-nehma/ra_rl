@@ -25,7 +25,7 @@ import torch.nn.functional as F
 # from torch.optim import Adam
 import torch.optim as optim
 from .utils import soft_update, hard_update, save_model
-from .model import GaussianPolicy, QNetwork, DeterministicPolicy, StepLRMargin, StepResetLR
+from .model import GaussianPolicy, QNetwork, MaxEnsembleNet, DeterministicPolicy, StepLRMargin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib.pyplot as plt
 from gym_reachability.gym_reachability.envs.env_utils import calculate_margin_circle
@@ -33,50 +33,18 @@ from gym_reachability.gym_reachability.envs.env_utils import calculate_margin_ci
 from collections import namedtuple
 Transition = namedtuple("Transition", ["s", "a", "d", "r", "s_", "a_", "done", "info"])
 
-# ---------------------------------------------------------------------------
-# MeanEnsembleNet
-# ---------------------------------------------------------------------------
-
-class MaxEnsembleNet(nn.Module):
-    """
-    Wraps N networks; forward(x) returns their mean output.
-
-    Registered as nn.ModuleList so next(parameters()).is_cuda and any
-    other nn.Module checks work identically to a plain Q_network.
-    """
-
-    def __init__(self, networks: List[nn.Module]):
-        super().__init__()
-        self.networks = nn.ModuleList(networks)
-
-    def forward(self, x, u, d: torch.Tensor) -> torch.Tensor:
-        """(B, A) — mean Q across all critics."""
-        qs = []
-        for net in self.networks:
-            q1, q2 = net(x, u, d)
-            qs.append(torch.max(q1, q2))
-        return torch.max(torch.stack(qs, dim=0), dim=0).values
-
-    def stack(self, x, u, d: torch.Tensor) -> torch.Tensor:
-        """(K, B, A) — raw per-critic outputs, no averaging."""
-        qs = []
-        for net in self.networks:
-            q1, q2 = net(x, u, d)
-            qs.append(torch.max(q1, q2))
-        return torch.stack(qs, dim=0)
-
-
 class SAC(object):
     def __init__(self, config, c_dimList, a_dimList, action_space, disturbance_space, n_workers: int = None,):
 
-        # ----------------------------------------------------------------
+        # 
         # Hyper-parameters  (kept as both lower- and UPPER-case so that
         # existing code referencing either form continues to work)
-        # ----------------------------------------------------------------
+        # 
         self.CONFIG     = config         
         self.tau        = config.TAU
         self.alpha_pro  = config.ALPHA
         self.alpha_adv  = config.ALPHA
+        # self.lambda_    = config.LAMBDA
         self.BATCH_SIZE = config.BATCH_SIZE   
 
         # Learning rate of updating the Q-network
@@ -115,48 +83,19 @@ class SAC(object):
             self.adv_log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
             self.adv_alpha_optim = optim.Adam([self.adv_log_alpha], lr=0.0003)
 
-        # ----------------------------------------------------------------
+            if self.CONFIG.MODE == "AARA_C":
+                self.log_lambda = torch.zeros(1, requires_grad=True, device=self.device)
+                self.lambda_optim = optim.Adam([self.log_lambda], lr=0.00001)
+
+        # 
         # Critics
-        # ----------------------------------------------------------------
-        self.critics: List[QNetwork] = []
-        self.critic_optimisers: List[optim.AdamW] = []
-        self.critic_schedulers: List [optim.lr_scheduler.StepLR] = []
-        self.critic_targets: List[QNetwork] = []
-        if config.SEED is None: 
-            config.SEED = 0
-        for i in range(self.num_critics):
-            cfg_i = copy.deepcopy(config)
-            cfg_i.SEED += i
-            self.critic = QNetwork(config, self.c_dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
-
-            self.critics.append(self.critic)
-            print(
-                f"  [Ensemble] Critic {i:02d} | seed={cfg_i.SEED}"
-                # f" | device={self.critic.device}"
-            )
-
-            self.critic_optim = optim.AdamW(self.critic.parameters(), lr=config.LR_C, weight_decay=1e-3)
-            self.critic_optimisers.append(self.critic_optim)
-
-            self.scheduler = optim.lr_scheduler.StepLR(
-                self.critic_optim, step_size=self.LR_C_PERIOD, gamma=self.LR_C_DECAY
-            )
-            self.critic_schedulers.append(self.scheduler)
-
-            self.critic_target = QNetwork(config, self.c_dimList, action_space.shape[0], disturbance_space.shape[0]).to(self.device)
-            hard_update(self.critic_target, self.critic)
-            self.critic_targets.append(self.critic_target)
+        # 
+        self.makeCritics('', action_space)
+        if self.CONFIG.MODE == "AARA_C":
+            self.makeCritics('RA_', action_space)
 
         self.max_grad_norm = 1
         self.cntUpdate = 0
-
-        # Thread pool — one worker per critic, reused across all update() calls.
-        # PyTorch releases the GIL during tensor ops so threads genuinely
-        # run in parallel on separate cores.
-        self._executor = ThreadPoolExecutor(max_workers=self.n_workers)
-
-        # Unified inference modules — what Trainer / env see as Q_network
-        self.Q_network = MaxEnsembleNet([c for c in self.critics])
 
         # Discount factor: anneal to one
         self.GAMMA      = config.GAMMA 
@@ -170,9 +109,9 @@ class SAC(object):
         )
         self.GAMMA = self.GammaScheduler.get_variable()
 
-        # ----------------------------------------------------------------
+        # 
         # Policies
-        # ----------------------------------------------------------------
+        # 
         PolicyCls = GaussianPolicy if self.policy_type == "Gaussian" else DeterministicPolicy
         if self.policy_type != "Gaussian":
             self.alpha = 0  # deterministic → no entropy bonus
@@ -194,12 +133,12 @@ class SAC(object):
         self.prev_pro_loss = 0.0
         self.prev_adv_loss = 0.0
 
-    # ------------------------------------------------------------------
+    # -
     # Trainer-facing API
-    # ------------------------------------------------------------------
+    # -
 
     # --- cntUpdate: must stay synced so Trainer's while-loop and
-    #     per-critic updateHyperParam() schedules all stay aligned -------
+    #     per-critic updateHyperParam() schedules all stay aligned -
 
     @property
     def cntUpdate(self):
@@ -219,9 +158,9 @@ class SAC(object):
         for c in self.critics:
             c.GAMMA = value
 
-    # ------------------------------------------------------------------
+    # -
     # Action selection
-    # ------------------------------------------------------------------
+    # -
 
     def select_action(self, state, explore=False):
         """
@@ -245,21 +184,343 @@ class SAC(object):
             disturbance.cpu().numpy()[0],
         )
 
-    # ------------------------------------------------------------------
+    def critic_update(self, critic, critic_target, critic_optim, state, action, non_final_state_nxt, non_final_mask, l_x, g_x, ep_unc=None):
+
+        # 
+        # 1.  Critic update (reach-avoid Bellman target)
+        # 
+        critic.train()
+
+        qf1, qf2 = critic(state, action)
+
+        max_qf_next_target = torch.zeros(self.BATCH_SIZE).to(self.device)
+
+        non_final_state_nxt = non_final_state_nxt[non_final_mask.cpu()]
+
+        with torch.no_grad():
+            next_action, next_log_pi_a, _ = self.protagonist.sample(non_final_state_nxt)
+            # next_disturb, next_log_pi_d, _ = self.adversary.sample(non_final_state_nxt)
+            qf1_next, qf2_next = critic_target(non_final_state_nxt, next_action)
+            # protagonist minimises → take the minimum of the two Q-heads
+        # max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
+        max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a)).view(-1)
+
+        # Epistemic-uncertainty weight
+        with torch.no_grad():
+            _lambda  = -torch.sqrt(ep_unc) if ep_unc is not None else 1.0
+            eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
+        
+        # Reach-avoid backup
+        terminal     = torch.max(l_x, g_x)
+        non_terminal = torch.max(g_x[non_final_mask],
+            torch.min(l_x[non_final_mask], eu_weight[non_final_mask].squeeze(-1) * max_qf_next_target[non_final_mask]))
+
+        next_q_value = torch.zeros(self.BATCH_SIZE).float().to(self.device)
+        final_mask = torch.logical_not(non_final_mask)
+        next_q_value[non_final_mask] = (
+            (1 - self.GAMMA) * terminal[non_final_mask] + self.GAMMA * non_terminal
+        )
+        next_q_value[final_mask] = terminal[final_mask]
+
+        qf1_loss = F.mse_loss(qf1, next_q_value.unsqueeze(-1).detach())
+        qf2_loss = F.mse_loss(qf2, next_q_value.unsqueeze(-1).detach())
+        qf_loss  = qf1_loss + qf2_loss
+
+        critic_optim.zero_grad()
+        qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+        critic_optim.step()
+
+        return qf1_loss, qf2_loss
+    
+    def RL_critic_update(self, critic, critic_target, critic_optim, state, action, non_final_state_nxt, non_final_mask, reward, ep_unc=None):
+
+        # 
+        # 1.  Critic update (reach-avoid Bellman target)
+        # 
+        critic.train()
+
+        qf1, qf2 = critic(state, action)
+
+        max_qf_next_target = torch.zeros(self.BATCH_SIZE).to(self.device)
+
+        non_final_state_nxt = non_final_state_nxt[non_final_mask.cpu()]
+
+        with torch.no_grad():
+            next_action, next_log_pi_a, _ = self.protagonist.sample(non_final_state_nxt)
+            qf1_next, qf2_next = critic_target(non_final_state_nxt, next_action)
+            # protagonist minimises → take the maximum of the two Q-heads
+        max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a)).view(-1)
+
+        # Epistemic-uncertainty weight
+        with torch.no_grad():
+            _lambda  = -torch.sqrt(ep_unc) if ep_unc is not None else torch.ones(1,1, device=self.device)
+            eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
+        
+        # Bellman backup
+        next_q_value = reward + self.GAMMA * eu_weight * max_qf_next_target.unsqueeze(1)
+
+        qf1_loss = F.mse_loss(qf1, next_q_value.detach())
+        qf2_loss = F.mse_loss(qf2, next_q_value.detach())
+        qf_loss  = qf1_loss + qf2_loss
+
+        critic_optim.zero_grad()
+        qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+        critic_optim.step()
+
+        return qf1_loss, qf2_loss
+
+    # -
+    # Gradient update
+    # -
+
+    def update(self, memory, batch_size, updates, batch=None):
+        """
+        One gradient step for the critic, protagonist, and adversary.
+
+        Args:
+            memory (ReplayMemory): replay buffer.
+            batch_size (int): mini-batch size.
+            updates (int): global update counter (used for target sync).
+            ep_unc (float | None): epistemic uncertainty weight.
+            batch (Transition | None): pre-assembled batch (optional).
+
+        Returns:
+            Tuple (qf1_loss, qf2_loss, pro_loss, adv_loss, alpha_tlog)
+            or None if the buffer is not yet large enough.
+        """
+        # if len(memory) < self.BATCH_SIZE * 20:
+        #     return None
+
+        #  sample from replay buffer 
+        if batch is None:
+            # transitions = memory.sample(self.BATCH_SIZE)
+            # batch = Transition(*zip(*transitions))
+            batch = memory.sample(self.BATCH_SIZE)
+
+        (
+            non_final_mask,
+            non_final_state_nxt,
+            state,
+            action,
+            action_next,
+            _,
+            reward,
+            g_x,
+            l_x,
+        ) = self.unpack_batch(batch)
+
+        self.epistem_uncertainty = self.get_uncertainty(state, action)["epistemic_uncertainty"]
+
+        if self.CONFIG.MODE == "AARA":
+            futures = {
+                self._executor.submit(self.critic_update, c, c_t, c_opt, state, action, non_final_state_nxt, non_final_mask, l_x, g_x, self.epistem_uncertainty): c
+                for c, c_t, c_opt in zip(self.critics, self.critic_targets, self.critic_optimisers)
+            }
+        elif self.CONFIG.MODE == "AARA_C":
+            futures = {
+                self._executor.submit(self.RL_critic_update, c, c_t, c_opt, state, action, non_final_state_nxt, non_final_mask, reward, self.epistem_uncertainty): c
+                for c, c_t, c_opt in zip(self.critics, self.critic_targets, self.critic_optimisers)
+            }
+
+        losses = []
+        for fut in as_completed(futures):
+            c = futures[fut]
+            result = fut.result()
+            if result is not None:
+                losses.append(result)
+
+        q_means = [torch.stack(t).mean(0) for t in zip(*losses)]
+        qf1_loss, qf2_loss = q_means
+
+        if updates % 4 == 0:
+            self.protagonist.train()
+            pi_pro, log_pi_pro, _ = self.protagonist.sample(state)
+
+            self.adversary.train()
+            pi_adv, log_pi_adv, _ = self.adversary.sample(state)
+
+            # 
+            # 2.  Protagonist update  (minimise Q)
+            # 
+
+            max_qf_pi = self.Q_network(state, pi_pro) 
+            
+            if self.CONFIG.MODE == "AARA":
+                # Protagonist wants to *minimise* Q  → minimise  Q - α·H
+                smoothness_loss = 0.002 * F.mse_loss(action_next, action)
+                pro_loss = (max_qf_pi + self.alpha_pro * log_pi_pro ).mean() + smoothness_loss
+
+            elif self.CONFIG.MODE == "AARA_C":
+                max_qf_cost = self.RA_Q_network(state, pi_pro)
+                # Protagonist wants to *minimise* Q  → minimise  Q - α·H
+                smoothness_loss = 0.002 * F.mse_loss(action_next, action)
+                pro_loss = (-max_qf_pi + self.alpha_pro * log_pi_pro + self.lambda_ * max_qf_cost).mean() + smoothness_loss
+            
+
+            self.protagonist_optim.zero_grad()
+            pro_loss.backward(retain_graph=True)
+            self.protagonist_optim.step()
+
+            self.prev_pro_loss = pro_loss.item()
+            # 
+            # 3.  Adversary update  (maximise Q) - does not have constraint
+            # 
+            max_qf_pi = self.Q_network(state, pi_adv)
+
+            # The adversary feeds its action into the *same* critic but wants
+            # to drive Q *up* → maximise  Q + α·H  (entropy regularised) -loss
+            adv_loss = (-max_qf_pi + self.alpha_adv * log_pi_adv).mean()
+
+            self.adversary_optim.zero_grad()
+            adv_loss.backward(retain_graph=True)
+            self.adversary_optim.step()
+
+            self.prev_adv_loss = adv_loss.item()
+
+        # 
+        # 4.  Alpha / entropy tuning 
+        # 
+        if self.autoAlphaTuning and updates % 8 == 0:
+            beta = 100
+            eff_pro_target_entropy = self.pro_target_entropy * torch.exp(-self.epistem_uncertainty.detach()*beta)
+
+            pro_alpha_loss = -(self.pro_log_alpha * (log_pi_pro + eff_pro_target_entropy).detach()).mean()
+            self.pro_alpha_optim.zero_grad()
+            pro_alpha_loss.backward()
+            self.pro_alpha_optim.step()
+            with torch.no_grad():
+                self.pro_log_alpha.data.clamp_(-10, 2)
+            self.alpha_pro = self.pro_log_alpha.exp()
+
+            eff_adv_target_entropy = self.adv_target_entropy * torch.exp(-self.epistem_uncertainty.detach()*beta)
+            adv_alpha_loss = -(self.adv_log_alpha * (log_pi_adv + eff_adv_target_entropy).detach()).mean()
+            self.adv_alpha_optim.zero_grad()
+            adv_alpha_loss.backward()
+            self.adv_alpha_optim.step()
+            with torch.no_grad():
+                self.adv_log_alpha.data.clamp_(-10, 2)
+            self.alpha_adv = self.adv_log_alpha.exp()
+
+            if self.CONFIG.MODE == "AARA_C":
+                lambda_loss = -self.log_lambda.exp() * max_qf_cost.detach().mean()
+                self.lambda_optim.zero_grad()
+                lambda_loss.backward()
+                self.lambda_optim.step()
+                with torch.no_grad():
+                    self.log_lambda.data.clamp_(-10, 2)
+                    self.lambda_ = self.log_lambda.exp()
+
+
+        alpha_tlogs = torch.tensor(float(self.alpha_pro))
+
+        # 
+        # 5.  Soft-update of target critic
+        # 
+        if updates % self.target_update_interval == 0:
+            for critic_target, critic in zip(self.critic_targets, self.critics):
+                soft_update(critic_target, critic, self.tau)
+
+        return (
+            qf1_loss.item(),
+            qf2_loss.item(),
+            self.prev_pro_loss,
+            self.prev_adv_loss,
+            alpha_tlogs.item(),
+            self.epistem_uncertainty
+        )
+    
+    # -
+    # Update Hyperparameters
+    # -
+
+    def updateHyperParam(self):
+        """
+        Updates the hypewr-parameters, such as learning rate, discount factor
+        (GAMMA) and exploration-exploitation tradeoff (EPSILON)
+        """
+        
+        lr = self.critic_optimisers[0].state_dict()["param_groups"][0]["lr"]
+        if (lr <= self.LR_C_END):
+            # for critic_optim in self.critic_optimisers:
+            for param_group in self.critic_optimisers[0].param_groups:
+                param_group["lr"] = self.LR_C_END
+        else:
+            [scheduler.step() for scheduler in self.critic_schedulers]
+            self.protagonist_scheduler.step()
+            self.adversary_scheduler.step()
+
+        self.GammaScheduler.step()
+        self.GAMMA = self.GammaScheduler.get_variable()
+
+    def slice_batch(tensor, idx, batch_size):
+        start = idx * batch_size
+        end = (idx + 1) * batch_size
+        return tensor[start:end]
+    
+    # - 
+    # Make Critics
+    #
+    def makeCritics(self, name, action_space):
+        ensemble: List[QNetwork] = []
+        optimisers: List[optim.AdamW] = []
+        schedulers: List [optim.lr_scheduler.StepLR] = []
+        targets: List[QNetwork] = []
+        if self.CONFIG.SEED is None: 
+            self.CONFIG.SEED = 0
+        for i in range(self.num_critics):
+            cfg_i = copy.deepcopy(self.CONFIG)
+            cfg_i.SEED += i
+            critic = QNetwork(self.CONFIG, self.c_dimList, action_space.shape[0]).to(self.device)
+
+            ensemble.append(critic)
+            print(
+                f"  [Ensemble] Critic {i:02d} | seed={cfg_i.SEED}"
+                # f" | device={self.critic.device}"
+            )
+
+            critic_optim = optim.AdamW(critic.parameters(), lr=self.CONFIG.LR_C, weight_decay=1e-3)
+            optimisers.append(critic_optim)
+
+            scheduler = optim.lr_scheduler.StepLR(
+                critic_optim, step_size=self.LR_C_PERIOD, gamma=self.LR_C_DECAY
+            )
+            schedulers.append(scheduler)
+
+            target = QNetwork(self.CONFIG, self.c_dimList, action_space.shape[0]).to(self.device)
+            hard_update(target, critic)
+            targets.append(target)
+
+        # Thread pool — one worker per critic, reused across all update() calls.
+        # PyTorch releases the GIL during tensor ops so threads genuinely
+        # run in parallel on separate cores.
+        self._executor = ThreadPoolExecutor(max_workers=self.n_workers)
+
+        # Unified inference modules — what Trainer / env see as Q_network
+        MaxEnsemble = MaxEnsembleNet([c for c in ensemble])
+
+        setattr(self, name + "critics", ensemble)
+        setattr(self, name + "critic_optimisers", optimisers)
+        setattr(self, name + "critic_schedulers", schedulers)
+        setattr(self, name + "critic_targets", targets)
+        setattr(self, name + "Q_network", MaxEnsemble)
+    
+    # -
     # Epistemic Uncertainty
-    # ------------------------------------------------------------------
+    # -
 
     @torch.no_grad()
-    def get_uncertainty(self, state_tensor, control, disturbance: torch.Tensor) -> dict:
+    def get_uncertainty(self, state_tensor, control: torch.Tensor) -> dict:
         """
         Per-state epistemic uncertainty.
 
         Parameters
-        ----------
+        --
         state_tensor : (B, state_dim) tensor on self.device
 
         Returns
-        -------
+        -
         dict:
             q_stack               (K, B, A)
             mean_q                (B, A)
@@ -269,7 +530,10 @@ class SAC(object):
             epistemic_uncertainty (B,)     mean(var_q) over action dim
             safe_disagreement     (B,)     critic disagreement on Q<0 (safe) sign
         """
-        q_stack = self.Q_network.stack(state_tensor, control, disturbance)   # (K, B, A)
+        if self.CONFIG.MODE == "AARA":
+            q_stack = self.Q_network.stack(state_tensor, control)   # (K, B, A)
+        elif self.CONFIG.MODE == "AARA_C":
+            q_stack = self.RA_Q_network.stack(state_tensor, control)   # (K, B, A)
 
         mean_q = q_stack.mean(dim=0)
         var_q  = q_stack.var(dim=0, unbiased=True)
@@ -325,14 +589,14 @@ class SAC(object):
             for iy, y in enumerate(ys):
                 states = np.array([x, y, 0, 0])
                 x_t, y_t = env.unwrapped.target_x_y_w_h[0, 0] - states[0], env.unwrapped.target_x_y_w_h[0, 1] - states[1] # relative position to the target
-                observations = np.column_stack([x_t, y_t, states[2], states[3]]) # relative position + theta + v
+                observations = np.column_stack([x_t, y_t, states[2], states[3]]) # relative position + theta + vx, vy, omega
                 for constraint_set in env.unwrapped.obstacles:
                     dir_x, dir_y, g_x_i = calculate_margin_circle(states[None, :2], constraint_set, negativeInside=False)
                     observations = np.column_stack([observations, dir_x, dir_y, g_x_i])
                 observations = torch.Tensor(observations).to(self.device)
                 _, _, control = self.protagonist.sample(observations)
-                _, _, disturbance = self.adversary.sample(observations)
-                m  = self.get_uncertainty(observations, control, disturbance)
+                # _, _, disturbance = self.adversary.sample(observations)
+                m  = self.get_uncertainty(observations, control)
                 out["mean_v"]              [ix, iy] = m["mean_q"].min().item()
                 out["var_v"]               [ix, iy] = m["var_q"].min(dim=-1).values.item()
                 out["std_v"]               [ix, iy] = m["std_q"].min(dim=-1).values.item()
@@ -403,192 +667,9 @@ class SAC(object):
             plt.show()
         plt.close(fig)
 
-    def critic_update(self, critic, critic_target, critic_optim, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, ep_unc=None):
-
-        # ----------------------------------------------------------------
-        # 1.  Critic update (reach-avoid Bellman target)
-        # ----------------------------------------------------------------
-        critic.train()
-
-        qf1, qf2 = critic(state, action, disturbance)
-
-        max_qf_next_target = torch.zeros(self.BATCH_SIZE).to(self.device)
-
-        non_final_state_nxt = non_final_state_nxt[non_final_mask.cpu()]
-
-        with torch.no_grad():
-            next_action, next_log_pi_a, _ = self.protagonist.sample(non_final_state_nxt)
-            next_disturb, next_log_pi_d, _ = self.adversary.sample(non_final_state_nxt)
-            qf1_next, qf2_next = critic_target(non_final_state_nxt, next_action, next_disturb)
-            # protagonist minimises → take the minimum of the two Q-heads
-        max_qf_next_target[non_final_mask] = (torch.max(qf1_next, qf2_next) + (self.alpha_pro * next_log_pi_a + self.alpha_adv * next_log_pi_d)/2).view(-1)
-
-        # Epistemic-uncertainty weight
-        with torch.no_grad():
-            _lambda  = -torch.sqrt(ep_unc) if ep_unc is not None else 1.0
-            eu_weight = torch.exp(_lambda * self.CONFIG.TIME_STEP)
-        
-        # Reach-avoid backup
-        terminal     = torch.max(l_x, g_x)
-        non_terminal = torch.max(g_x[non_final_mask],
-            torch.min(l_x[non_final_mask], eu_weight[non_final_mask].squeeze(-1) * max_qf_next_target[non_final_mask]))
-
-        next_q_value = torch.zeros(self.BATCH_SIZE).float().to(self.device)
-        final_mask = torch.logical_not(non_final_mask)
-        next_q_value[non_final_mask] = (
-            (1 - self.GAMMA) * terminal[non_final_mask] + self.GAMMA * non_terminal
-        )
-        next_q_value[final_mask] = terminal[final_mask]
-
-        qf1_loss = F.mse_loss(qf1, next_q_value.unsqueeze(-1).detach())
-        qf2_loss = F.mse_loss(qf2, next_q_value.unsqueeze(-1).detach())
-        qf_loss  = qf1_loss + qf2_loss
-
-        critic_optim.zero_grad()
-        qf_loss.backward()
-        torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
-        critic_optim.step()
-
-        return qf1_loss, qf2_loss
-
-    # ------------------------------------------------------------------
-    # Gradient update
-    # ------------------------------------------------------------------
-
-    def update(self, memory, batch_size, updates, batch=None):
-        """
-        One gradient step for the critic, protagonist, and adversary.
-
-        Args:
-            memory (ReplayMemory): replay buffer.
-            batch_size (int): mini-batch size.
-            updates (int): global update counter (used for target sync).
-            ep_unc (float | None): epistemic uncertainty weight.
-            batch (Transition | None): pre-assembled batch (optional).
-
-        Returns:
-            Tuple (qf1_loss, qf2_loss, pro_loss, adv_loss, alpha_tlog)
-            or None if the buffer is not yet large enough.
-        """
-        # if len(memory) < self.BATCH_SIZE * 20:
-        #     return None
-
-        # ---- sample from replay buffer ---------------------------------
-        if batch is None:
-            # transitions = memory.sample(self.BATCH_SIZE)
-            # batch = Transition(*zip(*transitions))
-            batch = memory.sample(self.BATCH_SIZE)
-
-        (
-            non_final_mask,
-            non_final_state_nxt,
-            state,
-            action,
-            action_next,
-            disturbance,
-            _,
-            g_x,
-            l_x,
-        ) = self.unpack_batch(batch)
-
-        self.epistem_uncertainty = self.get_uncertainty(state, action, disturbance)["epistemic_uncertainty"]
-
-        futures = {
-            self._executor.submit(self.critic_update, c, c_t, c_opt, state, action, disturbance, non_final_state_nxt, non_final_mask, l_x, g_x, self.epistem_uncertainty): c
-            for c, c_t, c_opt in zip(self.critics, self.critic_targets, self.critic_optimisers)
-        }
-
-        losses = []
-        for fut in as_completed(futures):
-            c = futures[fut]
-            result = fut.result()
-            if result is not None:
-                losses.append(result)
-
-        q_means = [torch.stack(t).mean(0) for t in zip(*losses)]
-        qf1_loss, qf2_loss = q_means
-
-        if updates % 4 == 0:
-            self.protagonist.train()
-            pi_pro, log_pi_pro, _ = self.protagonist.sample(state)
-
-            self.adversary.train()
-            pi_adv, log_pi_adv, _ = self.adversary.sample(state)
-
-            # ----------------------------------------------------------------
-            # 2.  Protagonist update  (minimise Q)
-            # ----------------------------------------------------------------
-            max_qf_pi = self.Q_network(state, pi_pro, pi_adv.detach())
-
-            # Protagonist wants to *minimise* Q  → minimise  Q - α·H
-            smoothness_loss = 0.002 * F.mse_loss(action_next, action)
-            pro_loss = (max_qf_pi + self.alpha_pro * log_pi_pro).mean() + smoothness_loss
-
-            self.protagonist_optim.zero_grad()
-            pro_loss.backward(retain_graph=True)
-            self.protagonist_optim.step()
-
-            self.prev_pro_loss = pro_loss.item()
-            # ----------------------------------------------------------------
-            # 3.  Adversary update  (maximise Q)   
-            # ----------------------------------------------------------------
-            max_qf_pi = self.Q_network(state, pi_pro.detach(), pi_adv)
-
-            # The adversary feeds its action into the *same* critic but wants
-            # to drive Q *up* → maximise  Q + α·H  (entropy regularised) -loss
-            adv_loss = (-max_qf_pi + self.alpha_adv * log_pi_adv).mean()
-
-            self.adversary_optim.zero_grad()
-            adv_loss.backward(retain_graph=True)
-            self.adversary_optim.step()
-
-            self.prev_adv_loss = adv_loss.item()
-
-        # ----------------------------------------------------------------
-        # 4.  Alpha / entropy tuning (disabled – kept for future use)
-        # ----------------------------------------------------------------
-        if self.autoAlphaTuning and updates % 8 == 0:
-            beta = 100
-            eff_pro_target_entropy = self.pro_target_entropy * torch.exp(-self.epistem_uncertainty.detach()*beta)
-
-            pro_alpha_loss = -(self.pro_log_alpha * (log_pi_pro + eff_pro_target_entropy).detach()).mean()
-            self.pro_alpha_optim.zero_grad()
-            pro_alpha_loss.backward()
-            self.pro_alpha_optim.step()
-            with torch.no_grad():
-                self.pro_log_alpha.data.clamp_(-10, 2)
-            self.alpha_pro = self.pro_log_alpha.exp()
-
-            eff_adv_target_entropy = self.adv_target_entropy * torch.exp(-self.epistem_uncertainty.detach()*beta)
-            adv_alpha_loss = -(self.adv_log_alpha * (log_pi_adv + eff_adv_target_entropy).detach()).mean()
-            self.adv_alpha_optim.zero_grad()
-            adv_alpha_loss.backward()
-            self.adv_alpha_optim.step()
-            with torch.no_grad():
-                self.adv_log_alpha.data.clamp_(-10, 2)
-            self.alpha_adv = self.adv_log_alpha.exp()
-
-        alpha_tlogs = torch.tensor(float(self.alpha_pro))
-
-        # ----------------------------------------------------------------
-        # 5.  Soft-update of target critic
-        # ----------------------------------------------------------------
-        if updates % self.target_update_interval == 0:
-            for critic_target, critic in zip(self.critic_targets, self.critics):
-                soft_update(critic_target, critic, self.tau)
-
-        return (
-            qf1_loss.item(),
-            qf2_loss.item(),
-            self.prev_pro_loss,
-            self.prev_adv_loss,
-            alpha_tlogs.item(),
-            self.epistem_uncertainty
-        )
-
-    # ------------------------------------------------------------------
+    # -
     # Checkpointing 
-    # ------------------------------------------------------------------
+    # -
 
     def save_checkpoint(self, env_name, suffix="", ckpt_path=None):
         os.makedirs("checkpoints/", exist_ok=True)
@@ -609,6 +690,7 @@ class SAC(object):
         )
 
     def load_checkpoint(self, modelIter, ckpt_path, evaluate=True):
+        net_mode = "eval" if evaluate else "train"
         pro_ckpt_path = os.path.join(ckpt_path, "pro_model", "model_{}.pt".format(modelIter))
         adv_ckpt_path = os.path.join(ckpt_path, "adv_model", "model_{}.pt".format(modelIter))
         print("Loading models from {}".format(pro_ckpt_path))
@@ -618,55 +700,34 @@ class SAC(object):
             for i, critic in enumerate(self.critics):
                 critic_ckpt_path_i = os.path.join(ckpt_path, "pro_model", "critic_{}".format(i), "critic_{}.pt".format(modelIter))
                 critic.load_state_dict(torch.load(critic_ckpt_path_i, map_location=self.device))
+                getattr(critic, net_mode)()
 
-            mode = "eval" if evaluate else "train"
-            for net in [self.protagonist, self.adversary, self.critic]:
-                getattr(net, mode)()
+            for net in [self.protagonist, self.adversary]:
+                getattr(net, net_mode)()
         
         self.Q_network = MaxEnsembleNet([c for c in self.critics])
 
-    def load_best_models(self, bestDir, evaluate=True):
+    def load_best_models(self, bestDir, mode='AARA', evaluate=True):
+        net_mode = "eval" if evaluate else "train"
         self.protagonist.load_state_dict(torch.load(os.path.join(bestDir, "protagonist.pt"),map_location=self.device))
         self.adversary.load_state_dict(torch.load(os.path.join(bestDir, "adversary.pt"),map_location=self.device))
-        for i, critic in enumerate(self.critics):
-            critic.load_state_dict(torch.load(os.path.join(bestDir, f"critic_{i}.pt"), map_location=self.device))
+        if mode == "AARA":
+            for i, critic in enumerate(self.critics):
+                critic.load_state_dict(torch.load(os.path.join(bestDir, f"critic_{i}.pt"), map_location=self.device))
+                getattr(critic, net_mode)()
+            self.Q_network = MaxEnsembleNet([c for c in self.critics])
+        elif mode == "AARA_C":
+            for i, critic in enumerate(self.RA_critics):
+                critic.load_state_dict(torch.load(os.path.join(bestDir, f"critic_{i}.pt"), map_location=self.device))
+                getattr(critic, net_mode)()
+            self.RA_Q_network = MaxEnsembleNet([c for c in self.RA_critics])
         
-        mode = "eval" if evaluate else "train"
-        for net in [self.protagonist, self.adversary, self.critic]:
-            getattr(net, mode)()
+        for net in [self.protagonist, self.adversary]:
+            getattr(net, net_mode)()
         
-        self.Q_network = MaxEnsembleNet([c for c in self.critics])
-
-    # ------------------------------------------------------------------
-    # Update Hyperparameters
-    # ------------------------------------------------------------------
-
-    def updateHyperParam(self):
-        """
-        Updates the hypewr-parameters, such as learning rate, discount factor
-        (GAMMA) and exploration-exploitation tradeoff (EPSILON)
-        """
-        lr = self.critic_optim.state_dict()["param_groups"][0]["lr"]
-        if (lr <= self.LR_C_END):
-            for critic_optim in self.critic_optimisers:
-                for param_group in critic_optim.param_groups:
-                    param_group["lr"] = self.LR_C_END
-        else:
-            self.scheduler.step()
-        self.protagonist_scheduler.step()
-        self.adversary_scheduler.step()
-
-        self.GammaScheduler.step()
-        self.GAMMA = self.GammaScheduler.get_variable()
-
-    def slice_batch(tensor, idx, batch_size):
-        start = idx * batch_size
-        end = (idx + 1) * batch_size
-        return tensor[start:end]
-
-    # ------------------------------------------------------------------
+    # -
     # Batch unpacking  (unchanged from original)
-    # ------------------------------------------------------------------
+    # -
 
     def unpack_batch(self, batch):
         """Decomposes the batch into tensors ready for update().

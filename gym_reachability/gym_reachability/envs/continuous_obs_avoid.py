@@ -536,7 +536,7 @@ class ContinuousObsAvoidEnv(gym.Env):
             elif self.mode == 'AARA' and sacAgent is not None:
                 _, _, action      = sacAgent.protagonist.sample(observations)  # (nx*ny, action_dim)
                 _, _, disturbance = sacAgent.adversary.sample(observations)    # (nx*ny, dist_dim)
-            values = sacAgent.Q_network(observations, action, disturbance)     # (nx*ny,)
+            values = sacAgent.Q_network(observations, action)     # (nx*ny,)
 
         v = values.cpu().numpy().reshape(nx, ny)
 

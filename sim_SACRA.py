@@ -79,6 +79,10 @@ else:
 args = SimpleNamespace(**{k: v for section in config_dict.values() for k, v in section.items()})
 print(args)
 
+if script_args.constrained_dir is None and args.mode == "AARA_C":
+    raise ValueError("Constrained AARA requires a pretrained model path to be defined.")
+
+
 # == CONFIGURATION ==
 env_name     = args.envName
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -219,6 +223,7 @@ CONFIG = ceConfig(
     DEVICE=device, 
     ENV_NAME=env_name, 
     NUM_ENVS = args.numEnvs,
+    MODE = args.mode,
     SEED=args.randomSeed,
     MAX_UPDATES=args.maxUpdates, 
     MAX_EP_STEPS=args.maxSteps,
@@ -277,7 +282,7 @@ a_dimList     = [stateDim] + CONFIG.A_ARCHITECTURE + [actionNum]
 sacAgent = SAC(CONFIG, c_dimList=c_dimList, a_dimList=a_dimList, action_space=eval_env.unwrapped.action_space, disturbance_space=eval_env.unwrapped.disturbance_space)  
 print(sacAgent)
 print("We want to use: {}, and Agent uses: {}".format(device, sacAgent.device))
-print("Critic is using cuda: ", next(sacAgent.critic.parameters()).is_cuda)
+print("Critic is using cuda: ", next(sacAgent.critics[0].parameters()).is_cuda)
 
 if script_args.checkpoint is not None:
     # sacAgent.load_checkpoint(script_args.checkpointVal, outFolder, evaluate=True)
@@ -442,7 +447,7 @@ if plotFigure or storeFigure:
     actDistMtx = action.cpu().detach().numpy().reshape(nx, ny, na)
     disturbDistMtx = disturbance.cpu().detach().numpy().reshape(nx, ny, nd)
 
-    unc = sacAgent.get_uncertainty(observationTensor.squeeze(0), action.squeeze(0), disturbance.squeeze(0))
+    unc = sacAgent.get_uncertainty(observationTensor.squeeze(0), action.squeeze(0))
     varMtx = unc["epistemic_uncertainty"].cpu().detach().numpy().reshape(nx, ny)
     disAgreeMtx = unc["safe_disagreement"].cpu().detach().numpy().reshape(nx,ny)
 

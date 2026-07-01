@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
+from typing import List
 
 
 LOG_SIG_MAX = 1
@@ -305,13 +306,13 @@ def build_mlp(dimList, activation, layernorm=False):
 
 
 class QNetwork(nn.Module):
-    def __init__(self, CONFIG, dimList, numActions, numDisturb):
+    def __init__(self, CONFIG, dimList, numActions):
         super(QNetwork, self).__init__()
 
         self.config = CONFIG
         self.actType = CONFIG.ACTIVATION
         sa_dimList = dimList.copy()
-        sa_dimList[0] = dimList[0] + numActions + numDisturb  # input is state-action pair
+        sa_dimList[0] = dimList[0] + numActions  # input is state-action pair
         sa_dimList[-1] = 1  # output is Q-value
         print("QNetwork dimList:", sa_dimList)
 
@@ -320,8 +321,8 @@ class QNetwork(nn.Module):
 
         self.apply(weights_init_)
 
-    def forward(self, state, action, disturbance):
-        xu = torch.cat([state, action, disturbance], 1)
+    def forward(self, state, action):
+        xu = torch.cat([state, action], 1)
 
         x1 = self.q_head1(xu)
         x2 = self.q_head2(xu)
@@ -390,6 +391,33 @@ class GaussianPolicy(nn.Module):
         self.action_bias = self.action_bias.to(device)
         return super(GaussianPolicy, self).to(device)
 
+class MaxEnsembleNet(nn.Module):
+    """
+    Wraps N networks; forward(x) returns their mean output.
+
+    Registered as nn.ModuleList so next(parameters()).is_cuda and any
+    other nn.Module checks work identically to a plain Q_network.
+    """
+
+    def __init__(self, networks: List[nn.Module]):
+        super().__init__()
+        self.networks = nn.ModuleList(networks)
+
+    def forward(self, x, u: torch.Tensor) -> torch.Tensor:
+        """(B, A) — mean Q across all critics."""
+        qs = []
+        for net in self.networks:
+            q1, q2 = net(x, u)
+            qs.append(torch.max(q1, q2))
+        return torch.max(torch.stack(qs, dim=0), dim=0).values
+
+    def stack(self, x, u: torch.Tensor) -> torch.Tensor:
+        """(K, B, A) — raw per-critic outputs, no averaging."""
+        qs = []
+        for net in self.networks:
+            q1, q2 = net(x, u)
+            qs.append(torch.max(q1, q2))
+        return torch.stack(qs, dim=0)
 
 class DeterministicPolicy(nn.Module):
     def __init__(self, CONFIG, dimList, numActions, action_space=None):

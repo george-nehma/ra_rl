@@ -205,7 +205,7 @@ class ceConfig(config):
       MAX_MODEL=10, DOUBLE=True, A_ARCHITECTURE=None, C_ARCHITECTURE=None, ACTIVATION="Tanh",
       SKIP=False, REWARD=-1, PENALTY=1, NUM_CRITICS=3, SELECT_WORST_Q=True,
       FIND_MAX_Q=False, SIM_MAX_Q=False, TIME_STEP=0.05, ALPHA=0.2, POLICY="Gaussian",
-      TARGET_UPDATE_INTERVAL=1, AUTO_ALPHA_TUNING=True, NUM_ENVS = 1,
+      TARGET_UPDATE_INTERVAL=1, AUTO_ALPHA_TUNING=True, NUM_ENVS = 1, MODE = "AARA"
   ):
     """
     Initializes a configuration object for (double) deep Q-network with the
@@ -266,6 +266,7 @@ class ceConfig(config):
         
     )
     self.DOUBLE = DOUBLE
+    self.MODE = MODE
     self.TAU = TAU
     self.HARD_UPDATE = HARD_UPDATE
     self.SOFT_UPDATE = SOFT_UPDATE
