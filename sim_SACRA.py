@@ -79,8 +79,8 @@ else:
 args = SimpleNamespace(**{k: v for section in config_dict.values() for k, v in section.items()})
 print(args)
 
-if script_args.constrained_dir is None and args.mode == "AARA_C":
-    raise ValueError("Constrained AARA requires a pretrained model path to be defined.")
+# if script_args.constrained_dir is None and args.mode == "AARA_C":
+#     raise ValueError("Constrained AARA requires a pretrained model path to be defined.")
 
 
 # == CONFIGURATION ==

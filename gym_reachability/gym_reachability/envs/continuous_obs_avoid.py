@@ -686,9 +686,7 @@ class ContinuousObsAvoidEnv(gym.Env):
         # one list per trajectory, seeded with initial state/empty controls
         state_hist   = [[states_np[i].copy()] for i in range(N)]  # N lists, each [(state_dim,)]
         control_hist = [[]                    for i in range(N)]   # N empty lists
-
-        traj_vals = [[max(self.target_margin(states_np[i, :2]),
-                        self.safety_margin(states_np[i, :2]))] for i in range(N)]
+        val_hist     = [[]                    for i in range(N)]
 
         for t in range(T):
             positions = states[:, :2].cpu().numpy()
@@ -717,6 +715,8 @@ class ContinuousObsAvoidEnv(gym.Env):
                 _, _, actions = protagonist.sample(observations)
                 _, _, disturbs = adversary.sample(observations)
 
+                value = sacAgent.Q_network(observations, actions)
+
             u_tot      = (actions.cpu().numpy()  * self.act_bound
                         + disturbs.cpu().numpy() * self.d_bound)   # (n_active, action_dim)
 
@@ -730,13 +730,14 @@ class ContinuousObsAvoidEnv(gym.Env):
             for j, i in enumerate(active_idx):
                 state_hist[i].append(states_np_now[i].copy())
                 control_hist[i].append(u_tot[j].copy())
+                val_hist[i].append(value[j].copy())
 
         # convert each trajectory's list of steps → a single (T_i, dim) array
         state_hist   = [np.stack(traj, axis=0) for traj in state_hist]    # N x (T_i, state_dim)
-        control_hist = [np.stack(ctrl, axis=0) if ctrl else np.zeros((0, u_tot.shape[-1]))
-                        for ctrl in control_hist]                          # N x (T_i, action_dim)
+        control_hist = [np.stack(ctrl, axis=0) if ctrl else np.zeros((0, u_tot.shape[-1])) for ctrl in control_hist]  # N x (T_i, action_dim)
+        val_hist     = [np.stack(val, axis=0) for val in val_hist]
 
-        return state_hist, results, traj_vals, control_hist
+        return state_hist, results, val_hist, control_hist
 
     # == Visualizing ==
     def render(self):
